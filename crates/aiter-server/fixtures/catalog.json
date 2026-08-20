@@ -1,0 +1,149 @@
+{
+  "products": [
+    {
+      "id": "espresso",
+      "title": "Espresso",
+      "price": {
+        "units": 25000,
+        "currency": "INR"
+      },
+      "description": "Double shot of our house espresso blend.",
+      "tags": [
+        "coffee",
+        "hot"
+      ],
+      "available_qty": 100
+    },
+    {
+      "id": "americano",
+      "title": "Americano",
+      "price": {
+        "units": 28000,
+        "currency": "INR"
+      },
+      "description": "Espresso pulled over hot water.",
+      "tags": [
+        "coffee",
+        "hot"
+      ],
+      "available_qty": 80
+    },
+    {
+      "id": "cappuccino",
+      "title": "Cappuccino",
+      "price": {
+        "units": 32000,
+        "currency": "INR"
+      },
+      "description": "Espresso with steamed milk and a thick foam cap.",
+      "tags": [
+        "coffee",
+        "hot",
+        "milk"
+      ],
+      "available_qty": 90
+    },
+    {
+      "id": "latte",
+      "title": "Caffe Latte",
+      "price": {
+        "units": 35000,
+        "currency": "INR"
+      },
+      "description": "Espresso with a generous amount of steamed milk.",
+      "tags": [
+        "coffee",
+        "hot",
+        "milk"
+      ],
+      "available_qty": 90
+    },
+    {
+      "id": "flat-white",
+      "title": "Flat White",
+      "price": {
+        "units": 36000,
+        "currency": "INR"
+      },
+      "description": "Double espresso with velvety microfoam.",
+      "tags": [
+        "coffee",
+        "hot",
+        "milk"
+      ],
+      "available_qty": 60
+    },
+    {
+      "id": "caffe-mocha",
+      "title": "Caffe Mocha",
+      "price": {
+        "units": 42000,
+        "currency": "INR"
+      },
+      "description": "Espresso with chocolate and steamed milk.",
+      "tags": [
+        "coffee",
+        "hot",
+        "chocolate"
+      ],
+      "available_qty": 50
+    },
+    {
+      "id": "cold-brew",
+      "title": "Cold Brew",
+      "price": {
+        "units": 38000,
+        "currency": "INR"
+      },
+      "description": "Slow-steeped overnight, served over ice.",
+      "tags": [
+        "coffee",
+        "cold"
+      ],
+      "available_qty": 70
+    },
+    {
+      "id": "filter-coffee",
+      "title": "South Indian Filter Coffee",
+      "price": {
+        "units": 20000,
+        "currency": "INR"
+      },
+      "description": "Traditional frothed filter kaapi.",
+      "tags": [
+        "coffee",
+        "hot",
+        "milk"
+      ],
+      "available_qty": 120
+    },
+    {
+      "id": "croissant",
+      "title": "Butter Croissant",
+      "price": {
+        "units": 18000,
+        "currency": "INR"
+      },
+      "description": "Flaky, golden, baked fresh each morning.",
+      "tags": [
+        "bakery",
+        "pastry"
+      ],
+      "available_qty": 40
+    },
+    {
+      "id": "blueberry-muffin",
+      "title": "Blueberry Muffin",
+      "price": {
+        "units": 22000,
+        "currency": "INR"
+      },
+      "description": "Soft muffin loaded with blueberries.",
+      "tags": [
+        "bakery",
+        "sweet"
+      ],
+      "available_qty": 35
+    }
+  ]
+}

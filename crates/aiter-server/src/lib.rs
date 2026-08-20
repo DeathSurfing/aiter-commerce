@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod checkout;
+pub mod seed;
 
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -22,6 +23,7 @@ pub fn router(state: AppState) -> Router {
         .route("/catalog/products/{id}", get(catalog::get_product))
         .route("/.well-known/agent-card.json", get(catalog::agent_card))
         .route("/llms.txt", get(catalog::llms_txt))
+        .route("/seed/catalog", get(seed::seed_catalog))
         .route("/carts", post(checkout::create_cart))
         .route(
             "/carts/{id}",
