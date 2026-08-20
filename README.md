@@ -34,6 +34,25 @@ AITER COMMERCE is built as a **weekend sprint**: everything demo-worthy lands wi
 
 New contributors: start with a `good first issue` in the Day 1 milestone.
 
+## Testing & CI
+
+Every PR runs a mandatory quality pipeline before it can merge. Keeping this green is the baseline for shipping; broken code never lands on `main`.
+
+Local (same gates CI runs):
+
+```bash
+./scripts/check.sh   # fmt --check, clippy -D warnings, test, build --release
+```
+
+CI (`.github/workflows/ci.yml`) runs the identical four gates on every push and pull request:
+
+- `cargo fmt --check` — formatting
+- `cargo clippy --all-targets --all-features -- -D warnings` — lint (warnings denied)
+- `cargo test --all-features` — unit + integration tests
+- `cargo build --release` — release build must compile
+
+Run `./scripts/check.sh` before pushing. If CI fails on your PR, it fails for a real reason.
+
 ## Run
 
 ```bash
