@@ -4,7 +4,7 @@
 //! without binding a socket: catalog feed, lookup, search, discovery card and
 //! llms.txt export.
 
-use aiter_core::catalog::Product;
+use aiter_core::catalog::{Catalog, Product};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
@@ -124,4 +124,18 @@ async fn llms_txt_is_deterministic_plain_text() {
     }
     assert!(b1.contains("Latte"));
     assert!(b1.contains("# AITER COMMERCE catalog"));
+}
+
+// --- Issue #12: demo seed export -------------------------------------------
+
+#[tokio::test]
+async fn seed_catalog_endpoint_serves_full_demo_catalog() {
+    let (status, body) = get("/seed/catalog").await;
+    assert_eq!(status, StatusCode::OK);
+    let catalog: Catalog = serde_json::from_str(&body).unwrap();
+    assert!(
+        catalog.products.len() >= 8,
+        "expected >= 8 products, got {}",
+        catalog.products.len()
+    );
 }

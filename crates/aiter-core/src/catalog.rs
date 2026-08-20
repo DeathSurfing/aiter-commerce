@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::amount::Amount;
 
+/// A merchant's set of sellable items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Catalog {
+    pub products: Vec<Product>,
+}
+
 /// A single sellable catalog item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Product {
