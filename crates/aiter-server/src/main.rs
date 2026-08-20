@@ -1,35 +1,12 @@
-//! AITER COMMERCE — thin HTTP server.
+//! AITER COMMERCE — thin HTTP server binary.
 //!
-//! Exposes the agent-facing + merchant-facing surface. Keep this crate thin:
-//! protocol and business logic live in `aiter-core`.
+//! Seeds shared catalog state and binds the listener. All routes live in the
+//! library crate (`aiter_server::router`) so integration tests can drive them
+//! without opening a socket.
 
-use axum::{routing::get, Json, Router};
-use serde_json::{json, Value};
 use std::net::SocketAddr;
 
-fn router() -> Router {
-    Router::new()
-        .route("/", get(service_info))
-        .route("/agentic/health", get(health))
-}
-
-/// Service identity for any agent or client that discovers us.
-async fn service_info() -> Json<Value> {
-    Json(json!({
-        "name": aiter_core::NAME,
-        "version": aiter_core::VERSION,
-        "repo": "https://github.com/DeathSurfing/aiter-commerce",
-        "agentic": true,
-    }))
-}
-
-/// Liveness + version probe.
-async fn health() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "version": aiter_core::VERSION,
-    }))
-}
+use aiter_server::catalog::{seed_catalog, AppState};
 
 #[tokio::main]
 async fn main() {
@@ -46,7 +23,8 @@ async fn main() {
         .unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let app = router();
+    let state = AppState::new(seed_catalog());
+    let app = aiter_server::router(state);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("failed to bind");

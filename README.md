@@ -38,6 +38,48 @@ New contributors: start with a `good first issue` in the Day 1 milestone.
 
 Every PR runs a mandatory quality pipeline before it can merge. Keeping this green is the baseline for shipping; broken code never lands on `main`.
 
+## Agent catalog surface (`aiter-server`)
+
+The server exposes an agent-readable catalog + discovery surface (Day 1):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /catalog/products` | Stable catalog feed (`aiter-core` `Product` JSON list, ordered by `id`) |
+| `GET /catalog/products/{id}` | Single product; `404` when unknown |
+| `GET /.well-known/agent-card.json` | A2A-style merchant discovery card (capabilities/endpoints) |
+| `GET /llms.txt` | Deterministic, LLM-readable plain-text catalog export |
+
+### `GET /catalog/products` schema
+
+Returns a JSON array of `aiter-core` `Product` objects, ordered by `id`:
+
+```json
+[
+  {
+    "id": "latte",
+    "title": "Caffè Latte",
+    "price": { "units": 480, "currency": "USD" },
+    "description": "Espresso with steamed milk.",
+    "tags": ["coffee", "drink", "hot"],
+    "image_url": null,
+    "available_qty": 50,
+    "variant": null
+  }
+]
+```
+
+`price.units` is an integer in the currency's minor units (never a float);
+`currency` is an ISO 4217 code. `image_url` and `variant` are optional and
+omitted when absent.
+
+Query parameters:
+
+| Param | Meaning |
+|---|---|
+| `limit`, `offset` | Pagination over the stable id-ordered list |
+| `tag` | Filter to products carrying this tag (case-insensitive) |
+| `search` | Keyword search; matches ranked by title match (title before tags) |
+
 Local (same gates CI runs):
 
 ```bash

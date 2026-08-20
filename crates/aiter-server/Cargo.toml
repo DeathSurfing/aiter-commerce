@@ -11,7 +11,7 @@ authors.workspace = true
 aiter-core = { path = "../aiter-core" }
 tokio.workspace = true
 axum.workspace = true
-tower.workspace = true
+tower = { workspace = true, features = ["util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
