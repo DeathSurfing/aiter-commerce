@@ -18,7 +18,23 @@ crates/
 
 ## Status
 
-Early scaffold. The library and server skeleton compile; protocol work is next (see `crates/aiter-core`).
+Early scaffold. The library and server skeleton compile; work is tracked in [GitHub milestones](https://github.com/DeathSurfing/aiter-commerce/milestones).
+
+## Roadmap
+
+Work is planned in themed, versioned milestones (order matters, each builds on the previous).
+
+| Milestone | Focus | Target |
+|---|---|---|
+| [v0.1.0](https://github.com/DeathSurfing/aiter-commerce/milestone/1) | Core data model & foundations | Sep 2026 |
+| [v0.2.0](https://github.com/DeathSurfing/aiter-commerce/milestone/2) | Agent-facing catalog & discovery | Sep 2026 |
+| [v0.3.0](https://github.com/DeathSurfing/aiter-commerce/milestone/3) | Cart & checkout flow | Oct 2026 |
+| [v0.4.0](https://github.com/DeathSurfing/aiter-commerce/milestone/4) | Payments rail: Razorpay | Oct 2026 |
+| [v0.5.0](https://github.com/DeathSurfing/aiter-commerce/milestone/5) | Agent identity & trust | Nov 2026 |
+| [v0.6.0](https://github.com/DeathSurfing/aiter-commerce/milestone/6) | MCP surface & end-to-end demo | Dec 2026 |
+| [v1.0.0](https://github.com/DeathSurfing/aiter-commerce/milestone/7) | Hardening & production readiness | Feb 2027 |
+
+New contributors: start with a `good first issue` in the next milestone.
 
 ## Run
 
