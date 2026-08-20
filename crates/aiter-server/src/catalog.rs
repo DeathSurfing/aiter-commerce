@@ -1,4 +1,4 @@
-//! Catalog REST surface (issues #8–#11).
+//! Catalog REST surface (issues #8–#11, #42–#46).
 //!
 //! Provides the agent/LLM-facing read model of the merchant catalog:
 //!
@@ -12,9 +12,11 @@
 //!
 //! ## `GET /catalog/products` response schema
 //!
-//! Returns a JSON **array** of `aiter_core::Product` objects (the same shape
-//! produced by the core `Product` serialization), in stable id-ascending order
-//! unless `?search=` re-ranks them. Each element is:
+//! Returns a paginated **envelope** (`{ items, total, limit, offset, has_more }`)
+//! so a client can walk every page and know when to stop. `items` is the array
+//! of `aiter_core::Product` objects (the same shape produced by the core
+//! `Product` serialization), in stable id-ascending order unless `?search=`
+//! re-ranks them. Each element is:
 //!
 //! ```json
 //! {
@@ -30,18 +32,18 @@
 //! ```
 //!
 //! Query parameters (all optional):
-//! * `limit`  — max number of items to return per page.
+//! * `limit`  — max number of items to return on this page (default 25, cap 100).
 //! * `offset` — number of items to skip (start of page).
-//! * `tag`    — keep only products that carry this tag.
-//! * `search` — keyword; ranks title matches above tag-only matches, then
-//!   falls back to stable id order.
+//! * `tag`    — keep only products that carry this tag (case-insensitive).
+//! * `search` — keyword matched against title, tags and description; ranks
+//!   title matches above tag-only above description-only, then stable id order.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -54,6 +56,11 @@ use aiter_core::catalog::Product;
 use aiter_core::checkout::CheckoutSession;
 use aiter_core::order::Order;
 use aiter_core::store::InMemoryStore;
+
+/// Default page size for the catalog feed when `?limit=` is not supplied.
+const DEFAULT_PAGE_LIMIT: usize = 25;
+/// Hard cap so a single response is always bounded (see #43).
+const MAX_PAGE_LIMIT: usize = 100;
 
 /// Shared application state: the in-memory catalog plus the Day-1 checkout
 /// stores (carts / sessions / orders) and the demo price book. One state type
@@ -163,36 +170,63 @@ pub async fn list_products(
 ) -> Json<Value> {
     let mut items: Vec<&Product> = state.products.iter().collect();
 
-    // Tag filter (#8).
+    // Tag filter (#8, case-insensitive per #42).
     if let Some(tag) = &params.tag {
-        items.retain(|p| p.tags.iter().any(|t| t == tag));
+        let tag = tag.trim();
+        items.retain(|p| p.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)));
     }
 
-    // Keyword search (#9): keep matches, rank title matches above tag-only
-    // matches, then stable id order within a rank.
+    // Keyword search (#9): keep matches across title, tags and description,
+    // then rank title > tag > description (earlier title position wins),
+    // falling back to stable id order within a rank (#44).
     if let Some(q) = &params.search {
         let q = q.to_lowercase();
-        items.retain(|p| {
-            p.title.to_lowercase().contains(&q)
-                || p.tags.iter().any(|t| t.to_lowercase().contains(&q))
-        });
+        items.retain(|p| search_rank(p, &q) > 0);
         items.sort_by(|a, b| {
-            let a_title = a.title.to_lowercase().contains(&q);
-            let b_title = b.title.to_lowercase().contains(&q);
-            b_title.cmp(&a_title).then_with(|| a.id.cmp(&b.id))
+            search_rank(b, &q)
+                .cmp(&search_rank(a, &q))
+                .then_with(|| a.id.cmp(&b.id))
         });
     }
 
+    let total = items.len();
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(usize::MAX);
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .min(MAX_PAGE_LIMIT);
     let page: Vec<Product> = items
         .into_iter()
         .skip(offset)
         .take(limit)
         .cloned()
         .collect();
+    let has_more = offset + page.len() < total;
 
-    Json(serde_json::to_value(page).expect("products serializable"))
+    Json(json!({
+        "items": page,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+    }))
+}
+
+/// Relevance score for a search keyword against a product (#44).
+///
+/// Higher is more relevant. Title matches dominate (scaled by earlier match
+/// position), then tag matches, then description matches; non-matches score 0.
+fn search_rank(product: &Product, q: &str) -> u64 {
+    if let Some(pos) = product.title.to_lowercase().find(q) {
+        return 100_000 - pos as u64;
+    }
+    if product.tags.iter().any(|t| t.to_lowercase().contains(q)) {
+        return 1_000;
+    }
+    if product.description.to_lowercase().contains(q) {
+        return 100;
+    }
+    0
 }
 
 /// `GET /catalog/products/{id}` — single product lookup, `404` for unknown (#9).
@@ -204,47 +238,66 @@ pub async fn get_product(State(state): State<AppState>, Path(id): Path<String>) 
 }
 
 /// `GET /.well-known/agent-card.json` — A2A-style discovery card (#10).
-pub async fn agent_card() -> Json<Value> {
+///
+/// Endpoints are advertised as absolute URLs resolved from the request host
+/// (honouring `X-Forwarded-Proto`/`X-Forwarded-Host` when present) so a fresh
+/// agent can call them without external context (#46).
+pub async fn agent_card(headers: HeaderMap) -> Json<Value> {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    let host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))
+        .unwrap_or("localhost:8080");
+    let base_url = format!("{scheme}://{host}");
+
     Json(json!({
         "agent": {
             "name": aiter_core::NAME,
             "version": aiter_core::VERSION,
         },
         "url": "https://github.com/DeathSurfing/aiter-commerce",
+        "service": base_url,
         "capabilities": ["catalog", "search", "discovery", "llms"],
         "endpoints": {
-            "catalog": "/catalog/products",
-            "product_lookup": "/catalog/products/{id}",
-            "search": "/catalog/products?search={query}",
-            "discovery": "/.well-known/agent-card.json",
-            "llms": "/llms.txt",
+            "catalog": format!("{base_url}/catalog/products"),
+            "product_lookup": format!("{base_url}/catalog/products/{{id}}"),
+            "search": format!("{base_url}/catalog/products?search={{query}}"),
+            "discovery": format!("{base_url}/.well-known/agent-card.json"),
+            "llms": format!("{base_url}/llms.txt"),
         },
     }))
 }
 
-/// `GET /llms.txt` — deterministic, plain-text, LLM-readable catalog export (#11).
+/// `GET /llms.txt` — deterministic, plain-text catalog export, llms.txt-shaped (#11, #45).
 ///
-/// Format: a plain-text document with a top-level heading, a short intro, and
-/// one section per product (in stable id order). Each product section begins
-/// with `# <title> (<id>)` and lists a description, price and tags on following
-/// lines — chosen so an LLM can cheaply scan the whole catalog without JSON.
+/// Follows the de-facto [llms.txt](https://llmstxt.org) convention: a `#` title,
+/// a `>` blockquote intro with links, then a `## Products` section of markdown
+/// links resolved against the public catalog path. Deterministic and
+/// id-ordered so generic llms.txt tools can parse it without `aiter-server`
+/// specific logic.
 pub async fn llms_txt(State(state): State<AppState>) -> String {
     let mut out = String::new();
     out.push_str("# AITER COMMERCE catalog\n\n");
-    out.push_str("Machine-readable catalog of products available from this merchant.\n");
-    out.push_str("Served from state in stable (id-ascending) order.\n\n");
+    out.push_str("> Machine-readable catalog of products available from this merchant.\n");
+    out.push_str("> Served in stable (id-ascending) order.\n");
+    out.push_str("> - [Browse catalog](/catalog/products)\n");
+    out.push_str("> - [Agent card](/.well-known/agent-card.json)\n\n");
+    out.push_str("## Products\n\n");
 
     for product in state.products.iter() {
-        out.push_str(&format!("# {} ({})\n", product.title, product.id));
-        if !product.description.is_empty() {
-            out.push_str(&format!("Description: {}\n", product.description));
-        }
-        out.push_str(&format!("Price: {}\n", format_amount(&product.price)));
-        if !product.tags.is_empty() {
-            out.push_str(&format!("Tags: {}\n", product.tags.join(", ")));
-        }
-        out.push_str(&format!("Available: {}\n", product.available_qty));
-        out.push('\n');
+        let desc = if product.description.is_empty() {
+            format_amount(&product.price)
+        } else {
+            product.description.clone()
+        };
+        out.push_str(&format!(
+            "- [{}](/catalog/products/{}): {}\n",
+            product.title, product.id, desc
+        ));
     }
     out
 }
