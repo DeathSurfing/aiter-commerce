@@ -5,8 +5,9 @@
 //! wrapper that seeds state and binds the listener.
 
 pub mod catalog;
+pub mod checkout;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
@@ -21,6 +22,24 @@ pub fn router(state: AppState) -> Router {
         .route("/catalog/products/{id}", get(catalog::get_product))
         .route("/.well-known/agent-card.json", get(catalog::agent_card))
         .route("/llms.txt", get(catalog::llms_txt))
+        .route("/carts", post(checkout::create_cart))
+        .route(
+            "/carts/{id}",
+            get(checkout::get_cart).put(checkout::update_cart),
+        )
+        .route("/carts/{id}/cancel", post(checkout::cancel_cart))
+        .route(
+            "/checkout_sessions",
+            post(checkout::create_checkout_session),
+        )
+        .route(
+            "/checkout_sessions/{id}/complete",
+            post(checkout::complete_checkout),
+        )
+        .route(
+            "/checkout_sessions/{id}/cancel",
+            post(checkout::cancel_checkout),
+        )
         .with_state(state)
 }
 
