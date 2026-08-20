@@ -44,33 +44,43 @@ The server exposes an agent-readable catalog + discovery surface (Day 1):
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /catalog/products` | Stable catalog feed (`aiter-core` `Product` JSON list, ordered by `id`) |
+| `GET /catalog/products` | Paginated, filterable catalog feed (envelope with `items`/`total`/`has_more`) |
 | `GET /catalog/products/{id}` | Single product; `404` when unknown |
-| `GET /.well-known/agent-card.json` | A2A-style merchant discovery card (capabilities/endpoints) |
-| `GET /llms.txt` | Deterministic, LLM-readable plain-text catalog export |
+| `GET /.well-known/agent-card.json` | A2A-style merchant discovery card (capabilities/endpoints, absolute URLs) |
+| `GET /llms.txt` | Deterministic, LLM-readable catalog export in the `llms.txt` convention |
 
 ### `GET /catalog/products` schema
 
-Returns a JSON array of `aiter-core` `Product` objects, ordered by `id`:
+Returns a paginated **envelope** — `{ items, total, limit, offset, has_more }` —
+so a client can walk every page and know when to stop. `items` is the array of
+`aiter-core` `Product` objects (same shape as the core `Product`
+serialization), ordered by `id` unless `?search=` re-ranks them:
 
 ```json
-[
-  {
-    "id": "latte",
-    "title": "Caffè Latte",
-    "price": { "units": 480, "currency": "USD" },
-    "description": "Espresso with steamed milk.",
-    "tags": ["coffee", "drink", "hot"],
-    "image_url": null,
-    "available_qty": 50,
-    "variant": null
-  }
-]
+{
+  "items": [
+    {
+      "id": "latte",
+      "title": "Caffè Latte",
+      "price": { "units": 480, "currency": "USD" },
+      "description": "Espresso with steamed milk.",
+      "tags": ["coffee", "drink", "hot"],
+      "image_url": null,
+      "available_qty": 50,
+      "variant": null
+    }
+  ],
+  "total": 1,
+  "limit": 25,
+  "offset": 0,
+  "has_more": false
+}
 ```
 
 `price.units` is an integer in the currency's minor units (never a float);
 `currency` is an ISO 4217 code. `image_url` and `variant` are optional and
-omitted when absent.
+omitted when absent. `limit` defaults to `25` and is capped at `100`, so the
+response stays bounded even when no `?limit=` is supplied.
 
 Query parameters:
 
@@ -78,7 +88,21 @@ Query parameters:
 |---|---|
 | `limit`, `offset` | Pagination over the stable id-ordered list |
 | `tag` | Filter to products carrying this tag (case-insensitive) |
-| `search` | Keyword search; matches ranked by title match (title before tags) |
+| `search` | Keyword search across title, tags and description; ranks title matches above tag-only above description-only |
+
+### `GET /.well-known/agent-card.json`
+
+The discovery card advertises `endpoints` as **absolute** URLs resolved from
+the request `Host` (honouring `X-Forwarded-Proto`/`X-Forwarded-Host`), plus a
+`service` base URL. A fresh agent can call the advertised endpoints without
+external context.
+
+### `GET /llms.txt`
+
+Follows the de-facto [llms.txt](https://llmstxt.org) convention: a `#` title,
+a `>` blockquote intro with links, then a `## Products` section of markdown
+links (`- [Title](/catalog/products/{id}): description`) in stable id order.
+Deterministic so a generic llms.txt client can parse it.
 
 Local (same gates CI runs):
 
