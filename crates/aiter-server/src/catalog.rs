@@ -36,6 +36,8 @@
 //! * `search` — keyword; ranks title matches above tag-only matches, then
 //!   falls back to stable id order.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -44,24 +46,68 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 use aiter_core::amount::{Amount, Currency};
+use aiter_core::cart::Cart;
 use aiter_core::catalog::Product;
+use aiter_core::checkout::CheckoutSession;
+use aiter_core::order::Order;
+use aiter_core::store::InMemoryStore;
 
-/// Shared application state holding the in-memory catalog.
+/// Shared application state: the in-memory catalog plus the Day-1 checkout
+/// stores (carts / sessions / orders) and the demo price book. One state type
+/// backs the whole router so catalog and checkout handlers share it.
 #[derive(Clone)]
 pub struct AppState {
     products: Arc<Vec<Product>>,
+    pub(crate) carts: Arc<Mutex<InMemoryStore<String, Cart>>>,
+    /// Cart ids that have been cancelled (idempotent, see `POST /carts/{id}/cancel`).
+    pub(crate) cancelled_carts: Arc<Mutex<HashSet<String>>>,
+    pub(crate) sessions: Arc<Mutex<InMemoryStore<String, CheckoutSession>>>,
+    pub(crate) orders: Arc<Mutex<InMemoryStore<String, Order>>>,
+    /// Demo product price book used to re-derive totals at pricing time.
+    prices: Arc<HashMap<String, Amount>>,
+    next_id: Arc<AtomicU64>,
 }
 
 impl AppState {
-    /// Build state from a product list, stored id-ascending for stable output.
+    /// Build state from a product list (stored id-ascending) plus fresh, empty
+    /// checkout stores and the demo price book.
     pub fn new(mut products: Vec<Product>) -> Self {
         products.sort_by(|a, b| a.id.cmp(&b.id));
         AppState {
             products: Arc::new(products),
+            carts: Arc::new(Mutex::new(InMemoryStore::new())),
+            cancelled_carts: Arc::new(Mutex::new(HashSet::new())),
+            sessions: Arc::new(Mutex::new(InMemoryStore::new())),
+            orders: Arc::new(Mutex::new(InMemoryStore::new())),
+            prices: Arc::new(default_price_book()),
+            next_id: Arc::new(AtomicU64::new(0)),
         }
     }
+
+    /// Generate the next sequential id for a store (`cart-0`, `cs-1`, ...).
+    pub(crate) fn gen_id(&self, prefix: &str) -> String {
+        let n = self.next_id.fetch_add(1, Ordering::SeqCst);
+        format!("{prefix}-{n}")
+    }
+
+    /// Look up a product's unit price in the demo price book.
+    pub(crate) fn price_of(&self, id: &str) -> Option<Amount> {
+        self.prices.get(id).copied()
+    }
+}
+
+/// The demo product price book: product id -> unit price in USD.
+fn default_price_book() -> HashMap<String, Amount> {
+    HashMap::from([
+        ("p1".to_string(), Amount::new(100, Currency::USD)), // $1.00
+        ("p2".to_string(), Amount::new(350, Currency::USD)), // $3.50
+        ("p3".to_string(), Amount::new(25, Currency::USD)),  // $0.25
+        ("p4".to_string(), Amount::new(1200, Currency::USD)), // $12.00
+        ("p5".to_string(), Amount::new(499, Currency::USD)), // $4.99
+    ])
 }
 
 /// A small inline catalog used to seed state — no external storage required
