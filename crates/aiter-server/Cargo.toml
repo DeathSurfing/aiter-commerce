@@ -1,0 +1,18 @@
+[package]
+name = "aiter-server"
+description = "AITER COMMERCE thin HTTP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aiter-core = { path = "../aiter-core" }
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true

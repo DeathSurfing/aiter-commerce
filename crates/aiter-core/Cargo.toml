@@ -1,0 +1,10 @@
+[package]
+name = "aiter-core"
+description = "AITER COMMERCE core — agentic commerce schemas and protocol primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
