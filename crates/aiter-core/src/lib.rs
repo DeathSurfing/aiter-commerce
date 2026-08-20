@@ -4,9 +4,21 @@
 //! checkout-session and payment-protocol schemas, and the logic an agent-facing
 //! merchant needs to be "AI-buyable".
 //!
-//! This crate is intentionally dependency-light. Protocol/schema code that can
-//! live without framework baggage belongs here; HTTP/runtime concerns live in
-//! `aiter-server`.
+//! This crate is intentionally dependency-light (only `serde` + `serde_json`
+//! for wire-format round-tripping). Protocol/schema code that can live without
+//! framework baggage belongs here; HTTP/runtime concerns live in `aiter-server`.
+//!
+//! Money is everywhere represented as integer minor units (see [`amount`]) —
+//! never floats.
+
+pub mod amount;
+pub mod cart;
+pub mod catalog;
+pub mod checkout;
+pub mod merchant;
+pub mod order;
+pub mod pricing;
+pub mod store;
 
 /// Human-facing name of the project.
 pub const NAME: &str = "AITER COMMERCE";
