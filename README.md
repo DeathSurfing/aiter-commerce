@@ -22,19 +22,17 @@ Early scaffold. The library and server skeleton compile; work is tracked in [Git
 
 ## Roadmap
 
-Work is planned in themed, versioned milestones (order matters, each builds on the previous).
+AITER COMMERCE is built as a **weekend sprint**: everything demo-worthy lands within one weekend (target Sat 2026-08-22 – Sun 2026-08-23), with hardening pushed to a post-weekend backlog.
 
-| Milestone | Focus | Target |
+| Milestone | Focus | Window |
 |---|---|---|
-| [v0.1.0](https://github.com/DeathSurfing/aiter-commerce/milestone/1) | Core data model & foundations | Sep 2026 |
-| [v0.2.0](https://github.com/DeathSurfing/aiter-commerce/milestone/2) | Agent-facing catalog & discovery | Sep 2026 |
-| [v0.3.0](https://github.com/DeathSurfing/aiter-commerce/milestone/3) | Cart & checkout flow | Oct 2026 |
-| [v0.4.0](https://github.com/DeathSurfing/aiter-commerce/milestone/4) | Payments rail: Razorpay | Oct 2026 |
-| [v0.5.0](https://github.com/DeathSurfing/aiter-commerce/milestone/5) | Agent identity & trust | Nov 2026 |
-| [v0.6.0](https://github.com/DeathSurfing/aiter-commerce/milestone/6) | MCP surface & end-to-end demo | Dec 2026 |
-| [v1.0.0](https://github.com/DeathSurfing/aiter-commerce/milestone/7) | Hardening & production readiness | Feb 2027 |
+| [Day 1 · Foundation & Agent Catalog](https://github.com/DeathSurfing/aiter-commerce/milestone/8) | Core data model + agent-readable catalog/discovery | Sat AM |
+| [Day 1 · Checkout Flow](https://github.com/DeathSurfing/aiter-commerce/milestone/9) | Cart + checkout sessions, totals, state machine | Sat PM |
+| [Day 2 · Razorpay Payments Rail](https://github.com/DeathSurfing/aiter-commerce/milestone/10) | Orders, payment links, webhook, Reserve Pay | Sun AM |
+| [Day 2 · Trust, MCP & End-to-End Demo](https://github.com/DeathSurfing/aiter-commerce/milestone/11) | Agent trust, MCP surface, e2e demo | Sun PM |
+| [Backlog · Post-weekend hardening](https://github.com/DeathSurfing/aiter-commerce/milestone/12) | Persistence, observability, config, rate limits | later |
 
-New contributors: start with a `good first issue` in the next milestone.
+New contributors: start with a `good first issue` in the Day 1 milestone.
 
 ## Run
 
