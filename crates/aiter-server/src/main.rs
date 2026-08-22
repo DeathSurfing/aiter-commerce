@@ -29,5 +29,12 @@ async fn main() {
         .await
         .expect("failed to bind");
     tracing::info!("aiter-server listening on {addr}");
-    axum::serve(listener, app).await.expect("server error");
+    // ConnectInfo lets the read-tier rate limiter key on the real peer IP
+    // (issue #35) instead of falling back to x-forwarded-for / "local".
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server error");
 }
