@@ -31,6 +31,7 @@ use aiter_core::pricing::{compute_totals, NoTax, PricingError, Totals};
 use aiter_core::store::{Store, StoreError};
 
 use crate::catalog::AppState;
+use crate::payments::RazorpayError;
 
 // ---------------------------------------------------------------------------
 // Cart API
@@ -275,6 +276,7 @@ pub(crate) enum ApiError {
     Store(StoreError),
     Checkout(CheckoutError),
     Pricing(PricingError),
+    Razorpay(RazorpayError),
 }
 
 impl From<StoreError> for ApiError {
@@ -295,6 +297,12 @@ impl From<PricingError> for ApiError {
     }
 }
 
+impl From<RazorpayError> for ApiError {
+    fn from(e: RazorpayError) -> Self {
+        ApiError::Razorpay(e)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (code, message): (StatusCode, String) = match self {
@@ -311,6 +319,11 @@ impl IntoResponse for ApiError {
                 format!("illegal checkout transition: {e:?}"),
             ),
             ApiError::Pricing(e) => (StatusCode::BAD_REQUEST, format!("unpriced item: {e:?}")),
+            ApiError::Razorpay(e) => match &e {
+                RazorpayError::Config(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
+                RazorpayError::Signature(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
+                _ => (StatusCode::BAD_GATEWAY, e.to_string()),
+            },
         };
         (code, Json(json!({ "error": message }))).into_response()
     }

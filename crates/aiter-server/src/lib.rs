@@ -43,6 +43,11 @@ pub fn router(state: AppState) -> Router {
             "/checkout_sessions/{id}/cancel",
             post(checkout::cancel_checkout),
         )
+        .route(
+            "/orders/{id}/payment_link",
+            post(payments::order_payment_link),
+        )
+        .route("/webhooks/razorpay", post(payments::razorpay_webhook))
         .with_state(state)
 }
 
