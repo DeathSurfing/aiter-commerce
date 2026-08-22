@@ -3,21 +3,68 @@
 //! Exposes the axum router and catalog surface so integration tests can drive
 //! it with `tower::ServiceExt::oneshot`. The binary (`main.rs`) is a thin
 //! wrapper that seeds state and binds the listener.
+//!
+//! # Public vs protected routes (issue #25)
+//!
+//! The router splits into a **public** read/discovery surface and a
+//! **protected** mutation surface. Anyone may call:
+//!
+//! * `GET /` and `GET /agentic/health` — service identity + liveness,
+//! * `GET /catalog/products` and `GET /catalog/products/{id}` — catalog reads,
+//! * `GET /.well-known/agent-card.json`, `GET /llms.txt` — discovery,
+//! * `GET /seed/catalog` — demo seed export,
+//! * `GET /carts/{id}` — cart reads (no state mutates on a read),
+//! * `POST /webhooks/razorpay` — Razorpay webhook delivery. **Deliberate
+//!   exception to the signed-write rule**: Razorpay authenticates webhooks
+//!   with its own HMAC-SHA256 signature (`x-razorpay-signature`,
+//!   [`payments::verify_webhook_signature`]) — the agent protocol cannot
+//!   produce that, so the route stays public and the handler verifies the
+//!   HMAC itself (fails closed without `RAZORPAY_WEBHOOK_SECRET`).
+//!
+//! Every other **mutating** endpoint requires a request signed by a
+//! registered agent ([`auth::require_signed`] middleware), including:
+//!
+//! * `POST /carts`, `PUT /carts/{id}`, `POST /carts/{id}/cancel`,
+//! * `POST /checkout_sessions`, `POST /checkout_sessions/{id}/complete`,
+//!   `POST /checkout_sessions/{id}/cancel`,
+//! * `POST /orders/{id}/payment_link` — mint a Razorpay payment link for an
+//!   order (agent-facing write with an external side effect: every call hits
+//!   the Razorpay API, so it must be attributable to a verified agent),
+//! * any future write routes (e.g. `/webhooks/*`) must be added behind the
+//!   same middleware — except webhooks whose authenticity is proven by the
+//!   provider's own signature (like `/webhooks/razorpay` above).
+//!
+//! A signed request carries `x-agent-id` (agent id) and `x-request-signature`
+//! (JSON-serialized [`aiter_core::signing::RequestSignature`]) headers;
+//! unregistered agents get `403`, missing/invalid signatures get `401`. The
+//! spend cap enforced at checkout completion is the *same* agent identity the
+//! middleware verified against (issues #26/#27 interact by design: the agent
+//! recorded in the receipt/audit log is the one whose signature passed).
 
+pub mod auth;
 pub mod catalog;
 pub mod checkout;
 pub mod mcp;
 pub mod payments;
 pub mod seed;
 
-use axum::routing::{get, post};
+use axum::middleware;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use catalog::AppState;
 
 /// Build the full application router with a shared [`AppState`].
+///
+/// Write routes are wrapped in [`auth::require_signed`] via
+/// `route_layer`, so signature verification (issue #25) runs before every
+/// mutation; read/discovery routes stay public (see the module docs).
 pub fn router(state: AppState) -> Router {
+    // Same middleware instance shape for every write route: it borrows a clone
+    // of the state (agent registry) and the state is consumed by with_state.
+    let require_signed = || middleware::from_fn_with_state(state.clone(), auth::require_signed);
+
     Router::new()
         .route("/", get(service_info))
         .route("/agentic/health", get(health))
@@ -26,28 +73,38 @@ pub fn router(state: AppState) -> Router {
         .route("/.well-known/agent-card.json", get(catalog::agent_card))
         .route("/llms.txt", get(catalog::llms_txt))
         .route("/seed/catalog", get(seed::seed_catalog))
-        .route("/carts", post(checkout::create_cart))
+        .route(
+            "/carts",
+            post(checkout::create_cart).route_layer(require_signed()),
+        )
         .route(
             "/carts/{id}",
-            get(checkout::get_cart).put(checkout::update_cart),
+            get(checkout::get_cart).put(put(checkout::update_cart).route_layer(require_signed())),
         )
-        .route("/carts/{id}/cancel", post(checkout::cancel_cart))
+        .route(
+            "/carts/{id}/cancel",
+            post(checkout::cancel_cart).route_layer(require_signed()),
+        )
         .route(
             "/checkout_sessions",
-            post(checkout::create_checkout_session),
+            post(checkout::create_checkout_session).route_layer(require_signed()),
         )
         .route(
             "/checkout_sessions/{id}/complete",
-            post(checkout::complete_checkout),
+            post(checkout::complete_checkout).route_layer(require_signed()),
         )
         .route(
             "/checkout_sessions/{id}/cancel",
-            post(checkout::cancel_checkout),
+            post(checkout::cancel_checkout).route_layer(require_signed()),
         )
         .route(
             "/orders/{id}/payment_link",
-            post(payments::order_payment_link),
+            post(payments::order_payment_link).route_layer(require_signed()),
         )
+        // Deliberately PUBLIC: Razorpay signs webhook deliveries with its own
+        // HMAC (`x-razorpay-signature`) — the agent does not — so require_signed
+        // must NOT wrap this route; the handler verifies the HMAC itself
+        // (see the module docs on the public/protected split).
         .route("/webhooks/razorpay", post(payments::razorpay_webhook))
         .with_state(state)
 }

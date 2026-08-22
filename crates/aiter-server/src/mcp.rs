@@ -200,7 +200,7 @@ async fn complete_checkout(state: &AppState, arguments: &Value) -> Result<String
         checkout::create_checkout_session(State(state.clone()), Json(session_request))
             .await
             .map_err(api_error)?;
-    let Json(order) = checkout::complete_checkout(State(state.clone()), Path(session.id))
+    let Json(order) = checkout::complete_checkout(State(state.clone()), None, Path(session.id))
         .await
         .map_err(api_error)?;
     serde_json::to_string(&order).map_err(|e| format!("serialize: {e}"))
@@ -225,6 +225,7 @@ fn api_error(err: checkout::ApiError) -> String {
         checkout::ApiError::Pricing(e) => format!("unpriced item: {e:?}"),
         checkout::ApiError::UnknownProduct(id) => format!("unknown product: {id}"),
         checkout::ApiError::Razorpay(e) => e.to_string(),
+        checkout::ApiError::SpendLimit(message) => message,
     }
 }
 
