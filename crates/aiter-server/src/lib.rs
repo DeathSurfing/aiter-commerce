@@ -13,6 +13,8 @@
 //! * `GET /catalog/products` and `GET /catalog/products/{id}` — catalog reads,
 //! * `GET /.well-known/agent-card.json`, `GET /llms.txt` — discovery,
 //! * `GET /seed/catalog` — demo seed export,
+//! * `GET /metrics` — plain-text request/order counter dump (issue #33; public
+//!   so operators and scrapers can reach it without agent signatures),
 //! * `GET /carts/{id}` — cart reads (no state mutates on a read),
 //! * `POST /webhooks/razorpay` — Razorpay webhook delivery. **Deliberate
 //!   exception to the signed-write rule**: Razorpay authenticates webhooks
@@ -65,6 +67,7 @@ pub mod catalog;
 pub mod checkout;
 pub mod cli;
 pub mod mcp;
+pub mod metrics;
 pub mod payments;
 pub mod rate_limit;
 pub mod reserve;
@@ -187,6 +190,13 @@ pub fn router(state: AppState) -> Router {
             "/webhooks/razorpay",
             post(payments::razorpay_webhook).route_layer(rate_limit_reads()),
         )
+        // Observability (issue #33): /metrics is public (no signature needed)
+        // and a per-request span + counter layer wraps every route.
+        .route("/metrics", get(metrics::metrics_handler))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            metrics::request_trace,
+        ))
         .with_state(state)
 }
 

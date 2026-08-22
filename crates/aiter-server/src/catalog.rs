@@ -60,6 +60,7 @@ use aiter_core::reserve::Consent;
 use aiter_core::signing::{AgentIdentity, AgentKeypair};
 use aiter_core::store::{InMemoryStore, Store};
 
+use crate::metrics::Metrics;
 use crate::rate_limit::{env_u32, RateLimiter, DEFAULT_READS_PER_MIN, DEFAULT_WRITES_PER_MIN};
 
 /// Default page size for the catalog feed when `?limit=` is not supplied.
@@ -124,6 +125,8 @@ pub struct AppState {
     pub(crate) audit: Arc<Mutex<AppendOnlyLog<Receipt>>>,
     /// UPI Reserve Pay consent ledger (#22): consent id -> one-time mandate.
     pub(crate) consents: Arc<Mutex<InMemoryStore<String, Consent>>>,
+    /// Hand-rolled request/order counters for observability (#33).
+    pub metrics: Arc<Metrics>,
     /// Write-tier rate limiter (per verified agent, issue #35).
     pub(crate) write_limiter: RateLimiter,
     /// Read-tier rate limiter (per client IP, issue #35).
@@ -197,6 +200,7 @@ impl AppState {
             agents: Arc::new(Mutex::new(agents)),
             audit: Arc::new(Mutex::new(AppendOnlyLog::new())),
             consents: Arc::new(Mutex::new(InMemoryStore::new())),
+            metrics: Arc::new(Metrics::default()),
             write_limiter: RateLimiter::new(writes_per_min),
             read_limiter: RateLimiter::new(reads_per_min),
         }

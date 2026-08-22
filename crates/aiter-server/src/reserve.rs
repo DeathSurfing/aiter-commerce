@@ -34,6 +34,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 
 use aiter_core::amount::{Amount, Currency};
 use aiter_core::reserve::{Consent, ConsentStatus};
@@ -136,6 +137,14 @@ pub(crate) async fn debit(
     Query(query): Query<DebitQuery>,
     Json(body): Json<DebitRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    // Observability (issue #33): one span per debit attempt, success or not.
+    let span = tracing::info_span!(
+        "reserve_debit",
+        consent_id = %body.consent_id,
+        amount_minor = body.amount_minor
+    );
+    let _guard = span.enter();
+
     let mut consents = st.consents.lock().await;
     let consent = consents
         .get(&body.consent_id)
@@ -164,6 +173,9 @@ pub(crate) async fn debit(
     consents
         .update(body.consent_id.clone(), updated)
         .map_err(ApiError::Store)?;
+
+    // Observability (issue #33): count the successful debit.
+    st.metrics.reserve_debits.fetch_add(1, Ordering::Relaxed);
 
     Ok(Json(json!({
         "status": "debited",
