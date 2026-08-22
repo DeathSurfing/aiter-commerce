@@ -38,7 +38,7 @@
 //! * `search` — keyword matched against title, tags and description; ranks
 //!   title matches above tag-only above description-only, then stable id order.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -55,6 +55,8 @@ use aiter_core::cart::Cart;
 use aiter_core::catalog::Product;
 use aiter_core::checkout::CheckoutSession;
 use aiter_core::order::Order;
+use aiter_core::receipt::{AppendOnlyLog, AuditEntry, Receipt};
+use aiter_core::signing::AgentIdentity;
 use aiter_core::store::InMemoryStore;
 
 /// Default page size for the catalog feed when `?limit=` is not supplied.
@@ -64,9 +66,12 @@ const MAX_PAGE_LIMIT: usize = 100;
 
 /// Shared application state: the in-memory catalog plus the Day-1 checkout
 /// stores (carts / sessions / orders). One state type backs the whole router
-/// so catalog and checkout handlers share it. Prices are never stored
+/// so catalog, checkout and auth share it. Prices are never stored
 /// separately: `price_of` resolves them from `products`, so the served
-/// catalog and the checkout price source can never diverge.
+/// catalog and the checkout price source can never diverge. Since Day-2
+/// trust enforcement (issues #25–#27) the state also carries the agent
+/// registry (verifying public key + per-agent spend cap) and the
+/// append-only audit log.
 #[derive(Clone)]
 pub struct AppState {
     products: Arc<Vec<Product>>,
@@ -76,11 +81,27 @@ pub struct AppState {
     pub(crate) sessions: Arc<Mutex<InMemoryStore<String, CheckoutSession>>>,
     pub(crate) orders: Arc<Mutex<InMemoryStore<String, Order>>>,
     next_id: Arc<AtomicU64>,
+    /// Registered agents: id -> verifying identity + spend cap (#25, #26).
+    pub(crate) agents: Arc<Mutex<HashMap<String, AgentRecord>>>,
+    /// Append-only audit trail of issued receipts (#27).
+    pub(crate) audit: Arc<Mutex<AppendOnlyLog<Receipt>>>,
+}
+
+/// A registered agent: the public identity used to verify its signed requests
+/// plus its configurable spend cap and how much it has spent so far (#26).
+#[derive(Debug, Clone)]
+pub struct AgentRecord {
+    pub identity: AgentIdentity,
+    /// Per-agent spend cap, in integer minor units of one currency.
+    pub spend_limit: Amount,
+    /// Minor units charged against the cap so far.
+    pub spent: Amount,
 }
 
 impl AppState {
     /// Build state from a product list (stored id-ascending) plus fresh, empty
-    /// checkout stores. Prices are resolved from the served catalog itself.
+    /// checkout stores, an empty agent registry and an empty audit log.
+    /// Prices are resolved from the served catalog itself.
     pub fn new(mut products: Vec<Product>) -> Self {
         products.sort_by(|a, b| a.id.cmp(&b.id));
         AppState {
@@ -90,6 +111,8 @@ impl AppState {
             sessions: Arc::new(Mutex::new(InMemoryStore::new())),
             orders: Arc::new(Mutex::new(InMemoryStore::new())),
             next_id: Arc::new(AtomicU64::new(0)),
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            audit: Arc::new(Mutex::new(AppendOnlyLog::new())),
         }
     }
 
@@ -102,6 +125,54 @@ impl AppState {
     /// Look up a product's unit price in the served catalog.
     pub(crate) fn price_of(&self, id: &str) -> Option<Amount> {
         self.products.iter().find(|p| p.id == id).map(|p| p.price)
+    }
+
+    /// Register (or re-register) an agent with a spend cap in minor units —
+    /// the identity its requests must verify against and the cap enforced at
+    /// checkout time (#25, #26). Caps are **per agent**, set at registration.
+    pub async fn register_agent(&self, identity: AgentIdentity, spend_limit: Amount) {
+        let record = AgentRecord {
+            identity: identity.clone(),
+            spend_limit,
+            spent: Amount::zero(spend_limit.currency()),
+        };
+        self.agents.lock().await.insert(identity.id, record);
+    }
+
+    /// Charge an order total against an agent's spend cap (#26).
+    ///
+    /// Returns `Err(message)` when the agent is not registered, the order
+    /// currency differs from the cap currency, or the cap would be exceeded.
+    /// On success the agent's `spent` is incremented by the order total.
+    pub(crate) async fn charge_agent(&self, agent_id: &str, amount: &Amount) -> Result<(), String> {
+        let mut agents = self.agents.lock().await;
+        let record = agents
+            .get_mut(agent_id)
+            .ok_or_else(|| format!("unknown agent {agent_id}"))?;
+        if record.spend_limit.currency() != amount.currency() {
+            return Err(format!(
+                "agent {agent_id}: order currency {} does not match spend-limit currency {}",
+                amount.currency().code(),
+                record.spend_limit.currency().code()
+            ));
+        }
+        let next = record.spent.units() + amount.units();
+        if next > record.spend_limit.units() {
+            return Err(format!(
+                "spend limit exceeded for agent {agent_id}: {} of {} minor units spent, order total {}",
+                record.spent.units(),
+                record.spend_limit.units(),
+                amount.units()
+            ));
+        }
+        record.spent = Amount::new(next, record.spent.currency());
+        Ok(())
+    }
+
+    /// Snapshot of the append-only audit log, oldest first (#27). Each entry
+    /// carries its monotonically increasing sequence plus the full receipt.
+    pub async fn audit_entries(&self) -> Vec<AuditEntry<Receipt>> {
+        self.audit.lock().await.entries().to_vec()
     }
 }
 
