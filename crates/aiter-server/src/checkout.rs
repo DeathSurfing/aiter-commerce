@@ -15,7 +15,7 @@
 //! the in-memory cart / session / order stores; unit prices resolve from the
 //! served catalog (`AppState::price_of`), never a separate price book.
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -29,8 +29,10 @@ use aiter_core::checkout::{
 };
 use aiter_core::order::Order;
 use aiter_core::pricing::{compute_totals, NoTax, PricingError, Totals};
+use aiter_core::receipt::Receipt;
 use aiter_core::store::{Store, StoreError};
 
+use crate::auth::VerifiedAgent;
 use crate::catalog::AppState;
 
 // ---------------------------------------------------------------------------
@@ -212,42 +214,66 @@ pub(crate) async fn create_checkout_session(
 /// creates the order in `Placed` status. Idempotent: completing an
 /// already-completed session is a no-op that returns the existing order (no
 /// double order is ever created).
+///
+/// Trust enforcement (issues #25–#27): over HTTP the request must carry a
+/// valid agent signature (checked by [`crate::auth::require_signed`] before
+/// this handler runs), the *same* verified agent is charged against its
+/// registered spend cap (a `403` over-limit checkout leaves the session
+/// untouched), and on success a [`Receipt`] is issued and appended to the
+/// audit log exactly once. The MCP stdio binding (#28) calls this handler
+/// directly without an agent context, so the agent argument is optional:
+/// spend-limit charging and receipts apply to agent-signed completions only.
 pub(crate) async fn complete_checkout(
     State(st): State<AppState>,
+    agent: Option<Extension<VerifiedAgent>>,
     Path(id): Path<String>,
 ) -> Result<Json<Order>, ApiError> {
     let mut orders = st.orders.lock().await;
     let mut sessions = st.sessions.lock().await;
 
     // The order id is deterministically derived from the session id, so an
-    // idempotent re-complete always resolves to the same order.
+    // idempotent re-complete always resolves to the same order. Returning the
+    // existing order here also guarantees the agent is charged and the audit
+    // entry appended exactly once per completed checkout.
     let order_key = format!("ord-{id}");
     if let Some(order) = orders.get(&order_key) {
         return Ok(Json(order.clone())); // already completed -> no-op
     }
 
     let mut session = sessions.get(&id).cloned().ok_or(ApiError::NotFound)?;
+    let order_total = session.totals.total;
+
     if session.status == CheckoutStatus::Paid {
-        // Session already paid but no order registered (edge case): create it.
-        let order = Order::new(order_key, id.clone(), session.totals, now());
-        orders
-            .create(order.id.clone(), order.clone())
-            .map_err(ApiError::Store)?;
-        return Ok(Json(order));
-    }
-    if session.status.is_terminal() {
+        // Session already paid but no order registered (edge case): nothing to
+        // reject — fall through and create it.
+    } else if session.status.is_terminal() {
         return Err(ApiError::Conflict("session is not completable".into()));
     }
 
-    // Legal path: Pending -> Ready -> Paid.
+    // Spend-cap enforcement BEFORE any state change: an over-limit checkout is
+    // rejected and the session is left exactly as it was (#26). Over HTTP the
+    // agent is always present (require_signed inserts it); the MCP stdio
+    // binding calls this handler directly with no agent context, so it skips
+    // charging — spend limits/receipts are attributes of agent-signed
+    // completions.
+    if let Some(agent) = agent.as_ref() {
+        let agent_id = &agent.0 .0; // Extension<VerifiedAgent> -> agent id
+        st.charge_agent(agent_id, &order_total)
+            .await
+            .map_err(ApiError::SpendLimit)?;
+    }
+
+    // Legal path: Pending -> Ready -> Paid (ready skipped when already Paid).
     if session.status == CheckoutStatus::Pending {
         session
             .apply_event(CheckoutEvent::MarkReady)
             .map_err(ApiError::Checkout)?;
     }
-    session
-        .apply_event(CheckoutEvent::MarkPaid)
-        .map_err(ApiError::Checkout)?;
+    if session.status != CheckoutStatus::Paid {
+        session
+            .apply_event(CheckoutEvent::MarkPaid)
+            .map_err(ApiError::Checkout)?;
+    }
 
     let order = Order::new(order_key, id.clone(), session.totals, now());
     orders
@@ -256,6 +282,22 @@ pub(crate) async fn complete_checkout(
     sessions
         .update(id.clone(), session)
         .map_err(ApiError::Store)?;
+
+    // Receipt + append-only audit entry (#27): who = verified agent, what =
+    // order id, when = now, amount = order total. Issued exactly once per
+    // completed agent-signed checkout; the MCP path has no agent identity to
+    // attribute, so nothing is recorded there.
+    if let Some(agent) = agent.as_ref() {
+        let receipt = Receipt::new(
+            format!("rcpt-{}", order.id),
+            agent.0 .0.clone(),
+            order.id.clone(),
+            order_total,
+            now(),
+        );
+        st.audit.lock().await.push(receipt);
+    }
+
     Ok(Json(order))
 }
 
@@ -292,6 +334,8 @@ pub(crate) enum ApiError {
     Pricing(PricingError),
     /// A cart line references a product id that is not in the served catalog.
     UnknownProduct(String),
+    /// Spend-cap enforcement at checkout completion (issue #26).
+    SpendLimit(String),
 }
 
 impl From<StoreError> for ApiError {
@@ -331,6 +375,7 @@ impl IntoResponse for ApiError {
             ApiError::UnknownProduct(id) => {
                 (StatusCode::BAD_REQUEST, format!("unknown product: {id}"))
             }
+            ApiError::SpendLimit(m) => (StatusCode::FORBIDDEN, m),
         };
         (code, Json(json!({ "error": message }))).into_response()
     }
@@ -340,27 +385,66 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use crate::catalog::seed_catalog;
+    use aiter_core::amount::Amount;
     use aiter_core::order::OrderStatus;
+    use aiter_core::signing::{AgentIdentity, AgentKeypair};
     use axum::body::{to_bytes, Body};
     use axum::http::{Method, Request};
     use axum::Router;
     use serde_json::Value;
+    use std::sync::OnceLock;
     use tower::ServiceExt;
 
+    /// The demo agent every test request is signed by. One keypair per test
+    /// process; registered (with a generous spend cap) by each `app()`.
+    fn demo_agent() -> &'static (AgentKeypair, AgentIdentity) {
+        static AGENT: OnceLock<(AgentKeypair, AgentIdentity)> = OnceLock::new();
+        AGENT.get_or_init(|| {
+            let keypair = AgentKeypair::generate();
+            let identity = keypair.identity("agent-1");
+            (keypair, identity)
+        })
+    }
+
+    /// Demo spend cap for the shared test agent (plenty for the existing flows).
+    const DEMO_CAP: i64 = 1_000_000;
+
+    /// Send a request signed by the demo agent (issue #25 middleware requires
+    /// it on every write route). `uri` is the origin-form path, which is what
+    /// the server reconstructs as the signed target URI.
     async fn call(
         app: &Router,
         method: Method,
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
-        let builder = Request::builder().method(method).uri(uri);
-        let req = match body {
-            Some(b) => builder
-                .header("content-type", "application/json")
-                .body(Body::from(b.to_string()))
-                .unwrap(),
-            None => builder.body(Body::empty()).unwrap(),
-        };
+        let (keypair, identity) = demo_agent();
+        let has_body = body.is_some();
+        let body_str = body.map(|b| b.to_string()).unwrap_or_default();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let signature = keypair.sign_request(
+            &identity.id,
+            method.as_str(),
+            uri,
+            body_str.as_bytes(),
+            timestamp,
+        );
+
+        let mut builder = Request::builder().method(method).uri(uri);
+        if has_body {
+            builder = builder.header("content-type", "application/json");
+        }
+        builder = builder
+            .header(super::super::auth::AGENT_ID_HEADER, &identity.id)
+            .header(
+                super::super::auth::SIGNATURE_HEADER,
+                serde_json::to_string(&signature).unwrap(),
+            );
+        let req = builder.body(Body::from(body_str)).unwrap();
+
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
@@ -368,13 +452,17 @@ mod tests {
         (status, json)
     }
 
-    fn app() -> Router {
-        crate::router(AppState::new(seed_catalog()))
+    async fn app() -> Router {
+        let st = AppState::new(seed_catalog());
+        let (_, identity) = demo_agent();
+        st.register_agent(identity.clone(), Amount::new(DEMO_CAP, Currency::USD))
+            .await;
+        crate::router(st)
     }
 
     #[tokio::test]
     async fn cart_crud_and_idempotent_cancel() {
-        let app = app();
+        let app = app().await;
 
         // Create a cart.
         let (status, created) = call(
@@ -420,14 +508,14 @@ mod tests {
 
     #[tokio::test]
     async fn missing_cart_is_404() {
-        let app = app();
+        let app = app().await;
         let (status, _) = call(&app, Method::GET, "/carts/nope", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn unknown_product_in_cart_is_rejected_with_400_and_totals_never_null() {
-        let app = app();
+        let app = app().await;
 
         // Unknown product ids are rejected up front with a clear JSON error.
         let (status, body) = call(
@@ -473,6 +561,9 @@ mod tests {
     #[tokio::test]
     async fn checkout_complete_produces_order_with_correct_totals() {
         let st = AppState::new(seed_catalog());
+        let (_, identity) = demo_agent();
+        st.register_agent(identity.clone(), Amount::new(DEMO_CAP, Currency::USD))
+            .await;
         let app = crate::router(st.clone());
 
         // Cart: p-latte x 2 ($4.50 each) + p-coldbrew x 1 ($5.00) => subtotal 1400.
@@ -532,11 +623,29 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(order2["id"], order["id"]);
         assert_eq!(st.orders.lock().await.len(), 1, "no double order");
+
+        // Trust (issues #26/#27): the verified agent was charged exactly once
+        // and exactly one receipt landed in the append-only audit log.
+        assert_eq!(
+            st.agents.lock().await.get("agent-1").unwrap().spent.units(),
+            1400,
+            "agent charged the order total once"
+        );
+        assert_eq!(
+            st.audit.lock().await.len(),
+            1,
+            "one audit entry per checkout"
+        );
+        let audit = st.audit.lock().await;
+        let entry = &audit.entries()[0];
+        assert_eq!(entry.entry.agent_id, "agent-1");
+        assert_eq!(entry.entry.order_id, order["id"].as_str().unwrap());
+        assert_eq!(entry.entry.amount.units(), 1400);
     }
 
     #[tokio::test]
     async fn checkout_cancel_is_idempotent() {
-        let app = app();
+        let app = app().await;
         let (_, cart) = call(
             &app,
             Method::POST,
@@ -579,7 +688,7 @@ mod tests {
 
     #[tokio::test]
     async fn completing_a_cancelled_session_is_rejected() {
-        let app = app();
+        let app = app().await;
         let (_, cart) = call(
             &app,
             Method::POST,
