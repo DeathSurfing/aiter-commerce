@@ -25,6 +25,7 @@ pub mod receipt;
 pub mod reserve;
 pub mod signing;
 pub mod store;
+pub mod util;
 
 /// Human-facing name of the project.
 pub const NAME: &str = "AITER COMMERCE";

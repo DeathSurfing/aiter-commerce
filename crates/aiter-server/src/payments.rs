@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 use aiter_core::amount::Currency;
 use aiter_core::order::OrderEvent;
 use aiter_core::store::{Store, StoreError};
+use aiter_core::util::now;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -497,14 +498,6 @@ async fn reconcile_payment(
     })
 }
 
-/// Unix seconds — the timestamp convention used across the checkout flow.
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Razorpay webhook envelope — only the fields we act on are modelled.
 #[derive(Deserialize)]
 struct WebhookEnvelope {
@@ -673,13 +666,14 @@ fn webhook_error_response(err: WebhookError) -> (StatusCode, Json<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util;
     use aiter_core::amount::Currency;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::post;
     use axum::{Json, Router};
     use serde_json::{json, Value};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
 
     // --- test helpers ------------------------------------------------------
 
@@ -1352,75 +1346,7 @@ mod tests {
 
     // --- (g) HTTP surface: payment link + webhook routes -------------------
 
-    use axum::body::to_bytes;
     use axum::http::Method;
-    use tower::ServiceExt;
-
-    /// The demo agent every signed test request is issued by (same pattern as
-    /// the checkout tests): one keypair per test process, registered against
-    /// a generous spend cap on the AppState before the router is built.
-    fn demo_agent() -> &'static (
-        aiter_core::signing::AgentKeypair,
-        aiter_core::signing::AgentIdentity,
-    ) {
-        static AGENT: OnceLock<(
-            aiter_core::signing::AgentKeypair,
-            aiter_core::signing::AgentIdentity,
-        )> = OnceLock::new();
-        AGENT.get_or_init(|| {
-            let keypair = aiter_core::signing::AgentKeypair::generate();
-            let identity = keypair.identity("agent-1");
-            (keypair, identity)
-        })
-    }
-
-    /// Register the demo agent on `st` — require_signed 403s unregistered
-    /// agents before any handler runs.
-    async fn register_demo_agent(st: &AppState) {
-        let (_, identity) = demo_agent();
-        st.register_agent(identity.clone(), Amount::new(1_000_000, Currency::USD))
-            .await;
-    }
-
-    /// Drive a write route with a request signed by the demo agent (the
-    /// require_signed middleware demands it on protected routes like
-    /// `/orders/{id}/payment_link`). Returns (status, JSON body or null).
-    async fn signed_call(
-        app: &Router,
-        method: Method,
-        uri: &str,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        let (keypair, identity) = demo_agent();
-        let body_str = body.map(|b| b.to_string()).unwrap_or_default();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let signature = keypair.sign_request(
-            &identity.id,
-            method.as_str(),
-            uri,
-            body_str.as_bytes(),
-            timestamp,
-        );
-        let mut builder = Request::builder().method(method).uri(uri);
-        if !body_str.is_empty() {
-            builder = builder.header("content-type", "application/json");
-        }
-        builder = builder
-            .header(crate::auth::AGENT_ID_HEADER, &identity.id)
-            .header(
-                crate::auth::SIGNATURE_HEADER,
-                serde_json::to_string(&signature).unwrap(),
-            );
-        let req = builder.body(Body::from(body_str)).unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, json)
-    }
 
     /// Set env vars for the duration of an async block. Same serialization
     /// discipline as `with_env`; tokio `current_thread` runtimes never wait on
@@ -1460,30 +1386,6 @@ mod tests {
     }
 
     /// Drive the full router with `tower::ServiceExt::oneshot`.
-    async fn call(
-        app: &Router,
-        method: Method,
-        uri: &str,
-        body: Option<Value>,
-        headers: &[(&str, &str)],
-    ) -> (StatusCode, Value) {
-        let mut builder = Request::builder().method(method).uri(uri);
-        for (name, value) in headers {
-            builder = builder.header(*name, *value);
-        }
-        let req = match body {
-            Some(b) => builder
-                .header("content-type", "application/json")
-                .body(Body::from(b.to_string()))
-                .unwrap(),
-            None => builder.body(Body::empty()).unwrap(),
-        };
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, json)
-    }
 
     #[tokio::test]
     async fn integration_checkout_then_payment_link_then_webhook_reconciles_order() {
@@ -1517,12 +1419,12 @@ mod tests {
             ],
             async move {
                 let st = AppState::new(seed_catalog());
-                register_demo_agent(&st).await;
+                test_util::register_test_agent(&st).await;
                 let app = crate::router(st.clone());
 
                 // 1. Checkout flow -> order in Placed status (write routes
                 // require an agent signature, see trust.md / lib.rs docs).
-                let (_, cart) = signed_call(
+                let (_, cart) = test_util::call(
                     &app,
                     Method::POST,
                     "/carts",
@@ -1534,7 +1436,7 @@ mod tests {
                 .await;
                 let cart_id = cart["id"].as_str().unwrap().to_string();
 
-                let (_, session) = signed_call(
+                let (_, session) = test_util::call(
                     &app,
                     Method::POST,
                     "/checkout_sessions",
@@ -1543,7 +1445,7 @@ mod tests {
                 .await;
                 let cs_id = session["id"].as_str().unwrap().to_string();
 
-                let (status, order) = signed_call(
+                let (status, order) = test_util::call(
                     &app,
                     Method::POST,
                     &format!("/checkout_sessions/{cs_id}/complete"),
@@ -1556,7 +1458,7 @@ mod tests {
 
                 // 2. Generate a payment link for the order (via mock Razorpay);
                 // the route is agent-protected, so the request is signed.
-                let (status, link) = signed_call(
+                let (status, link) = test_util::call(
                     &app,
                     Method::POST,
                     &format!("/orders/{order_id}/payment_link"),
@@ -1577,7 +1479,7 @@ mod tests {
                     r#"{{"event":"payment.paid","payload":{{"payment":{{"entity":{{"id":"pay_int_1","notes":{{"order_id":"{order_id}"}}}}}}}}}}"#
                 );
                 let signature = fixture_signature("whsec_test_secret", body.as_bytes());
-                let (status, receipt) = call(
+                let (status, receipt) = test_util::call_unsigned(
                     &app,
                     Method::POST,
                     "/webhooks/razorpay",
@@ -1594,7 +1496,7 @@ mod tests {
                 assert_eq!(order.payment_reference.as_deref(), Some("pay_int_1"));
 
                 // 4. Duplicate webhook is a no-op (still one Confirm entry).
-                let (status, _) = call(
+                let (status, _) = test_util::call_unsigned(
                     &app,
                     Method::POST,
                     "/webhooks/razorpay",
@@ -1608,7 +1510,7 @@ mod tests {
                 assert_eq!(order.timeline.len(), 2, "duplicate webhook: no double transition");
 
                 // 5. A bogus signature is rejected with 401.
-                let (status, _) = call(
+                let (status, _) = test_util::call_unsigned(
                     &app,
                     Method::POST,
                     "/webhooks/razorpay",
@@ -1625,12 +1527,13 @@ mod tests {
     #[tokio::test]
     async fn payment_link_endpoint_rejects_unknown_and_paid_orders() {
         let st = AppState::new(seed_catalog());
-        register_demo_agent(&st).await;
+        test_util::register_test_agent(&st).await;
         seed_order(&st, "ord-cs-0").await;
         let app = crate::router(st.clone());
 
         // Unknown order -> 404 (signed: the route sits behind require_signed).
-        let (status, _) = signed_call(&app, Method::POST, "/orders/nope/payment_link", None).await;
+        let (status, _) =
+            test_util::call(&app, Method::POST, "/orders/nope/payment_link", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
         // A reconciled (Confirmed, i.e. already paid) order -> 409, no new link.
@@ -1641,7 +1544,7 @@ mod tests {
             orders.update("ord-cs-0".to_string(), o).unwrap();
         }
         let (status, _) =
-            signed_call(&app, Method::POST, "/orders/ord-cs-0/payment_link", None).await;
+            test_util::call(&app, Method::POST, "/orders/ord-cs-0/payment_link", None).await;
         assert_eq!(status, StatusCode::CONFLICT);
     }
 }

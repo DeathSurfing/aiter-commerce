@@ -22,15 +22,14 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
-use tower::ServiceExt;
 
 use aiter_core::amount::{Amount, Currency};
 use aiter_core::cart::{Cart, LineItem};
 use aiter_core::checkout::Fulfillment;
-use aiter_server::auth::{AGENT_ID_HEADER, SIGNATURE_HEADER};
-use aiter_server::catalog::{demo_agent, AppState};
+use aiter_server::catalog::AppState;
 use aiter_server::payments::{RazorpayClient, RazorpayConfig, RazorpayError, RazorpayMode};
 use aiter_server::router;
+use aiter_server::test_util::{send_text, signed, signed_raw};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,82 +58,12 @@ impl XorShift {
     }
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// A router on fresh state. `AppState::default()` pre-registers the demo
 /// agent (`agent-demo`, fixed public keypair from `DEMO_AGENT_SEED`) with a
 /// generous USD cap, so every write below is signed by `demo_agent()` and
 /// passes `auth::require_signed`.
 fn test_app() -> Router {
     router(AppState::default())
-}
-
-/// Signed request with a JSON body (or empty body when `body` is `None`).
-/// The signature covers the exact serialized bytes, so the handler's `Json`
-/// extractor sees byte-for-byte what was signed.
-async fn signed(
-    app: &Router,
-    method: Method,
-    uri: &str,
-    body: Option<Value>,
-) -> (StatusCode, String) {
-    let (keypair, identity) = demo_agent();
-    let body_str = body.map(|b| b.to_string()).unwrap_or_default();
-    let signature = keypair.sign_request(
-        &identity.id,
-        method.as_str(),
-        uri,
-        body_str.as_bytes(),
-        now(),
-    );
-    let mut builder = Request::builder().method(method).uri(uri);
-    if !body_str.is_empty() {
-        builder = builder.header("content-type", "application/json");
-    }
-    let req = builder
-        .header(AGENT_ID_HEADER, &identity.id)
-        .header(SIGNATURE_HEADER, serde_json::to_string(&signature).unwrap())
-        .body(Body::from(body_str))
-        .unwrap();
-    send(app, req).await
-}
-
-/// Signed request with a RAW (possibly non-JSON) body / custom content type.
-async fn signed_raw(
-    app: &Router,
-    method: Method,
-    uri: &str,
-    body: &str,
-    headers: &[(&str, &str)],
-) -> (StatusCode, String) {
-    let (keypair, identity) = demo_agent();
-    let signature =
-        keypair.sign_request(&identity.id, method.as_str(), uri, body.as_bytes(), now());
-    let mut builder = Request::builder().method(method).uri(uri);
-    for (name, value) in headers {
-        builder = builder.header(*name, *value);
-    }
-    builder = builder
-        .header(AGENT_ID_HEADER, &identity.id)
-        .header(SIGNATURE_HEADER, serde_json::to_string(&signature).unwrap());
-    let req = builder.body(Body::from(body.to_string())).unwrap();
-    send(app, req).await
-}
-
-/// Unsigned request (public endpoints / webhook), returning raw body text so
-/// secret-leak assertions can inspect it.
-async fn send(app: &Router, req: Request<Body>) -> (StatusCode, String) {
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
-        .await
-        .unwrap();
-    (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The audit invariant: malformed input must be a clean 4xx and the response
@@ -526,7 +455,7 @@ async fn malformed_webhook_and_query_inputs_are_clean() {
             ),
         ];
         for (label, raw) in raw_bodies {
-            let (status, body_text) = send(
+            let (status, body_text) = send_text(
                 &app,
                 Request::builder()
                     .method(Method::POST)
@@ -549,7 +478,7 @@ async fn malformed_webhook_and_query_inputs_are_clean() {
         }
 
         // Missing signature header is a 401 (fail closed before any parse).
-        let (status, _) = send(
+        let (status, _) = send_text(
             &app,
             Request::builder()
                 .method(Method::POST)
@@ -586,7 +515,7 @@ async fn malformed_webhook_and_query_inputs_are_clean() {
         "/catalog/products?limit=1.5",
     ];
     for uri in query_uris {
-        let (status, body_text) = send(
+        let (status, body_text) = send_text(
             &app,
             Request::builder().uri(uri).body(Body::empty()).unwrap(),
         )
@@ -602,7 +531,7 @@ async fn malformed_webhook_and_query_inputs_are_clean() {
         "/carts/%00",
         "/carts/%E2%82%AC",
     ] {
-        let (status, body_text) = send(
+        let (status, body_text) = send_text(
             &app,
             Request::builder().uri(uri).body(Body::empty()).unwrap(),
         )
@@ -684,7 +613,7 @@ async fn bad_json_missing_content_type_and_oversized_bodies_are_4xx() {
     // Oversized body on the PUBLIC webhook route -> axum body-limit 4xx
     // (413), never 5xx.
     let huge = "y".repeat(3_000_000);
-    let (status, body_text) = send(
+    let (status, body_text) = send_text(
         &app,
         Request::builder()
             .method(Method::POST)
@@ -1139,7 +1068,7 @@ async fn fuzzish_random_bodies_never_5xx_or_panic() {
         let uri = format!(
             "/catalog/products?limit={neg_limit}&offset={neg_offset}&tag={junk}&search={junk}"
         );
-        let (status, body_text) = send(
+        let (status, body_text) = send_text(
             &app,
             Request::builder().uri(&uri).body(Body::empty()).unwrap(),
         )
@@ -1155,7 +1084,7 @@ async fn fuzzish_random_bodies_never_5xx_or_panic() {
             format!("/carts/{escaped}"),
             format!("/catalog/products/{escaped}"),
         ] {
-            let (status, body_text) = send(
+            let (status, body_text) = send_text(
                 &app,
                 Request::builder().uri(&path).body(Body::empty()).unwrap(),
             )
@@ -1193,7 +1122,7 @@ async fn fuzzish_webhook_garbage_never_5xx_or_panic() {
                 bytes.push(rng.below(256) as u8);
             }
             let sig: String = format!("{:016x}", rng.next_u64());
-            let (status, body_text) = send(
+            let (status, body_text) = send_text(
                 &app,
                 Request::builder()
                     .method(Method::POST)

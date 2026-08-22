@@ -7,15 +7,16 @@
 
 use std::collections::HashMap;
 
-use aiter_core::signing::AgentKeypair;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use aiter_server::auth::{AGENT_ID_HEADER, SIGNATURE_HEADER};
+use aiter_core::signing::AgentKeypair;
+
 use aiter_server::catalog::{demo_agent, seed_catalog, AppState};
+use aiter_server::test_util;
 
 /// A router over fresh state. `AppState::new` pre-registers the well-known
 /// demo agent, so all signed requests below can use `demo_agent()`'s keypair.
@@ -23,48 +24,9 @@ fn app() -> Router {
     aiter_server::router(AppState::new(seed_catalog()))
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Build a request signed by the given agent (same shape the existing trust
-/// tests use).
-fn signed_request(
-    method: Method,
-    uri: &str,
-    body: Value,
-    keypair: &AgentKeypair,
-    agent_id: &str,
-) -> Request<Body> {
-    let body_str = body.to_string();
-    let signature =
-        keypair.sign_request(agent_id, method.as_str(), uri, body_str.as_bytes(), now());
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header(AGENT_ID_HEADER, agent_id)
-        .header(SIGNATURE_HEADER, serde_json::to_string(&signature).unwrap())
-        .body(Body::from(body_str))
-        .unwrap()
-}
-
-/// Send a request through the router and return (status, body).
-async fn send(app: &Router, req: Request<Body>) -> (StatusCode, String) {
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    (status, String::from_utf8(bytes.to_vec()).unwrap())
-}
-
 /// GET a path and return (status, body).
 async fn get(app: &Router, path: &str) -> (StatusCode, String) {
-    send(
+    test_util::send_text(
         app,
         Request::builder().uri(path).body(Body::empty()).unwrap(),
     )
@@ -117,9 +79,9 @@ async fn complete_checkout_flow(
     keypair: &AgentKeypair,
     agent_id: &str,
 ) -> (StatusCode, String, String) {
-    let (status, cart) = send(
+    let (status, cart) = test_util::send_text(
         app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/carts",
             json!({ "currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}] }),
@@ -134,9 +96,9 @@ async fn complete_checkout_flow(
         .unwrap()
         .to_string();
 
-    let (status, session) = send(
+    let (status, session) = test_util::send_text(
         app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/checkout_sessions",
             json!({ "cart_id": cart_id }),
@@ -151,9 +113,9 @@ async fn complete_checkout_flow(
         .unwrap()
         .to_string();
 
-    let (status, order) = send(
+    let (status, order) = test_util::send_text(
         app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             &format!("/checkout_sessions/{cs_id}/complete"),
             json!(null),
@@ -198,7 +160,7 @@ async fn client_and_server_errors_increment_4xx_and_5xx() {
     let (status, _) = get(&app, "/catalog/products/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     // 401: unsigned write to a protected route.
-    let (status, _) = send(
+    let (status, _) = test_util::send_text(
         &app,
         Request::builder()
             .method(Method::POST)
@@ -214,9 +176,9 @@ async fn client_and_server_errors_increment_4xx_and_5xx() {
     let (keypair, identity) = demo_agent();
     let (status, order_id, _) = complete_checkout_flow(&app, &keypair, &identity.id).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = send(
+    let (status, _) = test_util::send_text(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             &format!("/orders/{order_id}/payment_link"),
             json!({}),
@@ -253,7 +215,7 @@ async fn completed_checkout_increments_checkouts_completed_but_rejected_401_does
 
     // A rejected (unsigned) completion never reaches the handler.
     let before = counters(&app).await;
-    let (status, _) = send(
+    let (status, _) = test_util::send_text(
         &app,
         Request::builder()
             .method(Method::POST)
@@ -276,9 +238,9 @@ async fn completed_checkout_increments_checkouts_completed_but_rejected_401_does
     );
 
     // Idempotent re-completion returns the existing order without re-counting.
-    let (status, _) = send(
+    let (status, _) = test_util::send_text(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             &format!("/checkout_sessions/{cs_id}/complete"),
             json!(null),

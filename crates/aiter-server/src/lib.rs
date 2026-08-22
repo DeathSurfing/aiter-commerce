@@ -73,6 +73,7 @@ pub mod payments;
 pub mod rate_limit;
 pub mod reserve;
 pub mod seed;
+pub mod test_util;
 
 use axum::middleware;
 use axum::routing::{get, post, put};
