@@ -224,6 +224,15 @@ fn api_error(err: checkout::ApiError) -> String {
         checkout::ApiError::Checkout(e) => format!("illegal checkout transition: {e:?}"),
         checkout::ApiError::Pricing(e) => format!("unpriced item: {e:?}"),
         checkout::ApiError::UnknownProduct(id) => format!("unknown product: {id}"),
+        checkout::ApiError::CurrencyMismatch {
+            product_id,
+            expected,
+            got,
+        } => format!(
+            "product {product_id} is priced in {} but the cart is in {}",
+            got.code(),
+            expected.code()
+        ),
         checkout::ApiError::Razorpay(e) => e.to_string(),
         checkout::ApiError::SpendLimit(message) => message,
     }
