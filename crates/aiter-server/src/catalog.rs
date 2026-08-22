@@ -38,7 +38,7 @@
 //! * `search` — keyword matched against title, tags and description; ranks
 //!   title matches above tag-only above description-only, then stable id order.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -63,8 +63,10 @@ const DEFAULT_PAGE_LIMIT: usize = 25;
 const MAX_PAGE_LIMIT: usize = 100;
 
 /// Shared application state: the in-memory catalog plus the Day-1 checkout
-/// stores (carts / sessions / orders) and the demo price book. One state type
-/// backs the whole router so catalog and checkout handlers share it.
+/// stores (carts / sessions / orders). One state type backs the whole router
+/// so catalog and checkout handlers share it. Prices are never stored
+/// separately: `price_of` resolves them from `products`, so the served
+/// catalog and the checkout price source can never diverge.
 #[derive(Clone)]
 pub struct AppState {
     products: Arc<Vec<Product>>,
@@ -73,14 +75,12 @@ pub struct AppState {
     pub(crate) cancelled_carts: Arc<Mutex<HashSet<String>>>,
     pub(crate) sessions: Arc<Mutex<InMemoryStore<String, CheckoutSession>>>,
     pub(crate) orders: Arc<Mutex<InMemoryStore<String, Order>>>,
-    /// Demo product price book used to re-derive totals at pricing time.
-    prices: Arc<HashMap<String, Amount>>,
     next_id: Arc<AtomicU64>,
 }
 
 impl AppState {
     /// Build state from a product list (stored id-ascending) plus fresh, empty
-    /// checkout stores and the demo price book.
+    /// checkout stores. Prices are resolved from the served catalog itself.
     pub fn new(mut products: Vec<Product>) -> Self {
         products.sort_by(|a, b| a.id.cmp(&b.id));
         AppState {
@@ -89,7 +89,6 @@ impl AppState {
             cancelled_carts: Arc::new(Mutex::new(HashSet::new())),
             sessions: Arc::new(Mutex::new(InMemoryStore::new())),
             orders: Arc::new(Mutex::new(InMemoryStore::new())),
-            prices: Arc::new(default_price_book()),
             next_id: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -100,32 +99,21 @@ impl AppState {
         format!("{prefix}-{n}")
     }
 
-    /// Look up a product's unit price in the demo price book.
+    /// Look up a product's unit price in the served catalog.
     pub(crate) fn price_of(&self, id: &str) -> Option<Amount> {
-        self.prices.get(id).copied()
+        self.products.iter().find(|p| p.id == id).map(|p| p.price)
     }
 }
 
 impl Default for AppState {
     /// Shared demo-state reuse path (issue #28): the seeded catalog plus fresh,
-    /// empty checkout stores and the demo price book. Used by the MCP stdio
-    /// server so it runs against the same in-memory state as the HTTP router.
+    /// empty checkout stores. Used by the MCP stdio server so it runs against
+    /// the same in-memory state as the HTTP router. Prices come from the served
+    /// catalog itself (`price_of`) — never a separate price book.
     fn default() -> Self {
         AppState::new(seed_catalog())
     }
 }
-
-/// The demo product price book: product id -> unit price in USD.
-fn default_price_book() -> HashMap<String, Amount> {
-    HashMap::from([
-        ("p1".to_string(), Amount::new(100, Currency::USD)), // $1.00
-        ("p2".to_string(), Amount::new(350, Currency::USD)), // $3.50
-        ("p3".to_string(), Amount::new(25, Currency::USD)),  // $0.25
-        ("p4".to_string(), Amount::new(1200, Currency::USD)), // $12.00
-        ("p5".to_string(), Amount::new(499, Currency::USD)), // $4.99
-    ])
-}
-
 /// A small inline catalog used to seed state — no external storage required
 /// for the Day-1 read model.
 pub fn seed_catalog() -> Vec<Product> {
@@ -242,7 +230,11 @@ fn search_rank(product: &Product, q: &str) -> u64 {
 pub async fn get_product(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.products.iter().find(|p| p.id == id) {
         Some(product) => Json(product).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "product not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -270,13 +262,26 @@ pub async fn agent_card(headers: HeaderMap) -> Json<Value> {
         },
         "url": "https://github.com/DeathSurfing/aiter-commerce",
         "service": base_url,
-        "capabilities": ["catalog", "search", "discovery", "llms"],
+        "capabilities": [
+            "catalog",
+            "search",
+            "discovery",
+            "llms",
+            "carts",
+            "checkout_sessions",
+            "seed",
+            "health",
+        ],
         "endpoints": {
             "catalog": format!("{base_url}/catalog/products"),
             "product_lookup": format!("{base_url}/catalog/products/{{id}}"),
             "search": format!("{base_url}/catalog/products?search={{query}}"),
             "discovery": format!("{base_url}/.well-known/agent-card.json"),
             "llms": format!("{base_url}/llms.txt"),
+            "carts": format!("{base_url}/carts"),
+            "checkout_sessions": format!("{base_url}/checkout_sessions"),
+            "seed": format!("{base_url}/seed/catalog"),
+            "health": format!("{base_url}/agentic/health"),
         },
     }))
 }

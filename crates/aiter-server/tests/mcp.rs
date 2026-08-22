@@ -154,25 +154,45 @@ fn mcp_client_exchange_drives_catalog_and_checkout() {
     assert_eq!(err["code"], -32602);
     assert_eq!(err["message"], "product not found");
 
-    // 6. create_cart with a fully-priced item -> cart id + totals.
+    // 6. create_cart with a served-catalog item -> cart id + totals from the
+    //    served catalog pricing (p-latte x2 = 900 units, i.e. $9.00).
     let resp = call_tool(
         &mut stdin,
         &mut stdout,
         6,
         "create_cart",
-        json!({"items": [{"product_id": "p1", "quantity": 2}]}),
+        json!({"items": [{"product_id": "p-latte", "quantity": 2}]}),
     );
     assert!(resp.get("error").is_none(), "create_cart must succeed");
     let cart: Value = serde_json::from_str(&tool_text(&resp)).unwrap();
     let cart_id = cart["id"].as_str().expect("cart id").to_string();
     assert!(cart_id.starts_with("cart-"));
-    assert_eq!(cart["totals"]["subtotal"]["units"], 200); // 2 x $1.00 (p1)
+    assert_eq!(cart["totals"]["subtotal"]["units"], 900); // 2 x $4.50 (p-latte)
 
-    // 7. complete_checkout on that cart -> order in Placed status.
+    // 7. create_cart with an unknown product id -> JSON-RPC error (the HTTP
+    //    handler now rejects unknown ids with a 400, never a null-totals cart).
     let resp = call_tool(
         &mut stdin,
         &mut stdout,
         7,
+        "create_cart",
+        json!({"items": [{"product_id": "p1", "quantity": 1}]}),
+    );
+    let err = resp["error"]
+        .as_object()
+        .expect("unknown product must be an error");
+    assert_eq!(err["code"], -32602);
+    assert_eq!(err["message"], "unknown product: p1");
+    assert!(
+        resp.get("result").is_none(),
+        "an errored call carries an error member, never a result"
+    );
+
+    // 8. complete_checkout on that cart -> order in Placed status.
+    let resp = call_tool(
+        &mut stdin,
+        &mut stdout,
+        8,
         "complete_checkout",
         json!({"cart_id": cart_id}),
     );
@@ -183,13 +203,13 @@ fn mcp_client_exchange_drives_catalog_and_checkout() {
         .as_str()
         .unwrap()
         .starts_with("cs-"));
-    assert_eq!(order["totals"]["subtotal"]["units"], 200);
+    assert_eq!(order["totals"]["subtotal"]["units"], 900);
 
-    // 8. complete_checkout on a missing cart -> error response.
+    // 9. complete_checkout on a missing cart -> error response.
     let resp = call_tool(
         &mut stdin,
         &mut stdout,
-        8,
+        9,
         "complete_checkout",
         json!({"cart_id": "cart-nope"}),
     );

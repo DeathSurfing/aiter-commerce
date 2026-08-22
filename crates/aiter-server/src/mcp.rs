@@ -179,7 +179,7 @@ async fn get_product(state: &AppState, arguments: &Value) -> Result<String, Stri
 }
 
 /// Reuse the HTTP cart-creation handler ([`crate::checkout::create_cart`]):
-/// same store, same id generator, same price book.
+/// same store, same id generator, pricing resolved from the served catalog.
 async fn create_cart(state: &AppState, arguments: &Value) -> Result<String, String> {
     let request: checkout::CreateCartRequest =
         serde_json::from_value(arguments.clone()).map_err(|e| format!("invalid arguments: {e}"))?;
@@ -223,6 +223,7 @@ fn api_error(err: checkout::ApiError) -> String {
         checkout::ApiError::Store(StoreError::AlreadyExists) => "already exists".to_string(),
         checkout::ApiError::Checkout(e) => format!("illegal checkout transition: {e:?}"),
         checkout::ApiError::Pricing(e) => format!("unpriced item: {e:?}"),
+        checkout::ApiError::UnknownProduct(id) => format!("unknown product: {id}"),
     }
 }
 

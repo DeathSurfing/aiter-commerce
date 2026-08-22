@@ -129,7 +129,10 @@ async fn product_lookup_known_id_is_200_unknown_is_404() {
     assert_eq!(status, StatusCode::OK);
     let (status, body) = get("/catalog/products/nope-nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body.is_empty());
+    assert!(
+        body.contains("product not found"),
+        "404 must carry a JSON error body, got: {body}"
+    );
 }
 
 #[tokio::test]
@@ -182,7 +185,16 @@ async fn agent_card_is_valid_json_with_capabilities() {
         .iter()
         .map(|c| c.as_str().unwrap())
         .collect();
-    for cap in ["catalog", "search", "discovery", "llms"] {
+    for cap in [
+        "catalog",
+        "search",
+        "discovery",
+        "llms",
+        "carts",
+        "checkout_sessions",
+        "seed",
+        "health",
+    ] {
         assert!(caps.contains(&cap), "missing capability {cap}");
     }
 }
@@ -205,10 +217,39 @@ async fn agent_card_resolves_absolute_endpoints_from_host() {
         .as_str()
         .unwrap()
         .starts_with(service));
+    // Every advertised endpoint resolves against the service base URL.
+    for key in ["carts", "checkout_sessions", "seed", "health"] {
+        let ep = card["endpoints"][key].as_str().unwrap();
+        assert!(ep.starts_with(service), "{key} should be absolute: {ep}");
+    }
+    assert!(card["endpoints"]["carts"]
+        .as_str()
+        .unwrap()
+        .ends_with("/carts"));
+    assert!(card["endpoints"]["seed"]
+        .as_str()
+        .unwrap()
+        .ends_with("/seed/catalog"));
+    assert!(card["endpoints"]["health"]
+        .as_str()
+        .unwrap()
+        .ends_with("/agentic/health"));
     // A marketable full URL for the catalog feed.
     let full = card["endpoints"]["catalog"].as_str().unwrap();
     assert!(full.ends_with("/catalog/products"));
     assert!(full.starts_with("http://api.example.com"));
+}
+
+// --- Service info ---------------------------------------------------------------
+
+#[tokio::test]
+async fn service_info_reports_status_ok() {
+    let (status, body) = get("/").await;
+    assert_eq!(status, StatusCode::OK);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "ok");
+    assert!(v["name"].is_string());
+    assert!(v["version"].is_string());
 }
 
 // --- Issue #11: llms.txt export ---------------------------------------------
