@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod checkout;
+pub mod mcp;
 pub mod seed;
 
 use axum::routing::{get, post};

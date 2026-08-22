@@ -106,6 +106,15 @@ impl AppState {
     }
 }
 
+impl Default for AppState {
+    /// Shared demo-state reuse path (issue #28): the seeded catalog plus fresh,
+    /// empty checkout stores and the demo price book. Used by the MCP stdio
+    /// server so it runs against the same in-memory state as the HTTP router.
+    fn default() -> Self {
+        AppState::new(seed_catalog())
+    }
+}
+
 /// The demo product price book: product id -> unit price in USD.
 fn default_price_book() -> HashMap<String, Amount> {
     HashMap::from([
