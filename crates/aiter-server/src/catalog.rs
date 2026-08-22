@@ -58,7 +58,7 @@ use aiter_core::order::Order;
 use aiter_core::receipt::{AppendOnlyLog, AuditEntry, Receipt};
 use aiter_core::reserve::Consent;
 use aiter_core::signing::AgentIdentity;
-use aiter_core::store::InMemoryStore;
+use aiter_core::store::{InMemoryStore, Store};
 
 /// Default page size for the catalog feed when `?limit=` is not supplied.
 const DEFAULT_PAGE_LIMIT: usize = 25;
@@ -177,6 +177,12 @@ impl AppState {
     /// carries its monotonically increasing sequence plus the full receipt.
     pub async fn audit_entries(&self) -> Vec<AuditEntry<Receipt>> {
         self.audit.lock().await.entries().to_vec()
+    }
+
+    /// Look up a single order by id (read path for integration tests; there is
+    /// no order read route on the wire yet).
+    pub async fn order(&self, id: &str) -> Option<Order> {
+        self.orders.lock().await.get(&id.to_string()).cloned()
     }
 }
 

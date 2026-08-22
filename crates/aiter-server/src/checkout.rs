@@ -34,6 +34,7 @@ use aiter_core::store::{Store, StoreError};
 
 use crate::auth::VerifiedAgent;
 use crate::catalog::AppState;
+use crate::payments::RazorpayError;
 
 // ---------------------------------------------------------------------------
 // Cart API
@@ -332,6 +333,7 @@ pub(crate) enum ApiError {
     Store(StoreError),
     Checkout(CheckoutError),
     Pricing(PricingError),
+    Razorpay(RazorpayError),
     /// A cart line references a product id that is not in the served catalog.
     UnknownProduct(String),
     /// Spend-cap enforcement at checkout completion (issue #26).
@@ -356,6 +358,12 @@ impl From<PricingError> for ApiError {
     }
 }
 
+impl From<RazorpayError> for ApiError {
+    fn from(e: RazorpayError) -> Self {
+        ApiError::Razorpay(e)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (code, message): (StatusCode, String) = match self {
@@ -372,6 +380,11 @@ impl IntoResponse for ApiError {
                 format!("illegal checkout transition: {e:?}"),
             ),
             ApiError::Pricing(e) => (StatusCode::BAD_REQUEST, format!("unpriced item: {e:?}")),
+            ApiError::Razorpay(e) => match &e {
+                RazorpayError::Config(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
+                RazorpayError::Signature(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
+                _ => (StatusCode::BAD_GATEWAY, e.to_string()),
+            },
             ApiError::UnknownProduct(id) => {
                 (StatusCode::BAD_REQUEST, format!("unknown product: {id}"))
             }

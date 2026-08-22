@@ -13,16 +13,26 @@
 //! * `GET /catalog/products` and `GET /catalog/products/{id}` — catalog reads,
 //! * `GET /.well-known/agent-card.json`, `GET /llms.txt` — discovery,
 //! * `GET /seed/catalog` — demo seed export,
-//! * `GET /carts/{id}` — cart reads (no state mutates on a read).
+//! * `GET /carts/{id}` — cart reads (no state mutates on a read),
+//! * `POST /webhooks/razorpay` — Razorpay webhook delivery. **Deliberate
+//!   exception to the signed-write rule**: Razorpay authenticates webhooks
+//!   with its own HMAC-SHA256 signature (`x-razorpay-signature`,
+//!   [`payments::verify_webhook_signature`]) — the agent protocol cannot
+//!   produce that, so the route stays public and the handler verifies the
+//!   HMAC itself (fails closed without `RAZORPAY_WEBHOOK_SECRET`).
 //!
-//! Every **mutating** endpoint requires a request signed by a registered
-//! agent ([`auth::require_signed`] middleware), including:
+//! Every other **mutating** endpoint requires a request signed by a
+//! registered agent ([`auth::require_signed`] middleware), including:
 //!
 //! * `POST /carts`, `PUT /carts/{id}`, `POST /carts/{id}/cancel`,
 //! * `POST /checkout_sessions`, `POST /checkout_sessions/{id}/complete`,
 //!   `POST /checkout_sessions/{id}/cancel`,
+//! * `POST /orders/{id}/payment_link` — mint a Razorpay payment link for an
+//!   order (agent-facing write with an external side effect: every call hits
+//!   the Razorpay API, so it must be attributable to a verified agent),
 //! * any future write routes (e.g. `/webhooks/*`) must be added behind the
-//!   same middleware.
+//!   same middleware — except webhooks whose authenticity is proven by the
+//!   provider's own signature (like `/webhooks/razorpay` above).
 //!
 //! A signed request carries `x-agent-id` (agent id) and `x-request-signature`
 //! (JSON-serialized [`aiter_core::signing::RequestSignature`]) headers;
@@ -96,6 +106,15 @@ pub fn router(state: AppState) -> Router {
             "/reserve_pay/debit",
             post(reserve::debit).route_layer(require_signed()),
         )
+        .route(
+            "/orders/{id}/payment_link",
+            post(payments::order_payment_link).route_layer(require_signed()),
+        )
+        // Deliberately PUBLIC: Razorpay signs webhook deliveries with its own
+        // HMAC (`x-razorpay-signature`) — the agent does not — so require_signed
+        // must NOT wrap this route; the handler verifies the HMAC itself
+        // (see the module docs on the public/protected split).
+        .route("/webhooks/razorpay", post(payments::razorpay_webhook))
         .with_state(state)
 }
 

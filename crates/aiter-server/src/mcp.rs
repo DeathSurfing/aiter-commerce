@@ -224,6 +224,7 @@ fn api_error(err: checkout::ApiError) -> String {
         checkout::ApiError::Checkout(e) => format!("illegal checkout transition: {e:?}"),
         checkout::ApiError::Pricing(e) => format!("unpriced item: {e:?}"),
         checkout::ApiError::UnknownProduct(id) => format!("unknown product: {id}"),
+        checkout::ApiError::Razorpay(e) => e.to_string(),
         checkout::ApiError::SpendLimit(message) => message,
     }
 }
