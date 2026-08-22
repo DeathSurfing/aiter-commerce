@@ -87,6 +87,10 @@ pub struct Order {
     pub totals: Totals,
     pub status: OrderStatus,
     pub timeline: Vec<TimelineEntry>,
+    /// Payment transaction id recorded by reconciliation (#21) when the order
+    /// is paid via webhook; `None` until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_reference: Option<String>,
 }
 
 impl Order {
@@ -106,6 +110,7 @@ impl Order {
                 to: OrderStatus::Placed,
                 at: now,
             }],
+            payment_reference: None,
         }
     }
 
@@ -150,6 +155,25 @@ mod tests {
         assert_eq!(o.timeline.len(), 1);
         assert_eq!(o.timeline[0].to, OrderStatus::Placed);
         assert_eq!(o.timeline[0].at, 1000);
+    }
+
+    #[test]
+    fn new_order_has_no_payment_reference() {
+        // Payment reconciliation (#21) records the transaction id here; a
+        // fresh order has none.
+        let o = Order::new("o1", "cs1", totals(), 1000);
+        assert_eq!(o.payment_reference, None);
+    }
+
+    #[test]
+    fn serde_round_trip_carries_payment_reference() {
+        let mut o = Order::new("o1", "cs1", totals(), 1000);
+        o.apply_event(OrderEvent::Confirm, 1100).unwrap();
+        o.payment_reference = Some("pay_fixture".to_string());
+        let json = serde_json::to_string(&o).expect("serialize");
+        let back: Order = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(o, back);
+        assert_eq!(back.payment_reference.as_deref(), Some("pay_fixture"));
     }
 
     #[test]
