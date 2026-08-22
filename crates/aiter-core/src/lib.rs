@@ -21,6 +21,7 @@ pub mod merchant;
 pub mod order;
 pub mod pricing;
 pub mod receipt;
+pub mod reserve;
 pub mod signing;
 pub mod store;
 
