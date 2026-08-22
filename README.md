@@ -16,9 +16,10 @@ crates/
 └── aiter-server/  # thin HTTP server — axum, exposes the agent-facing + merchant-facing surface
 ```
 
-`aiter-server` ships two binaries:
+`aiter-server` ships three binaries:
 
-- `aiter-server` — the HTTP router (`cargo run -p aiter-server`)
+- `aiter-server` — the HTTP router with a tiny `run | init | seed` CLI (`cargo run -p aiter-server`; see [Configuration](#configuration-issue-34) and the [CLI](#cli) table)
+- `aiter-cli` — an example agent client that drives the signed flow end to end
 - `mcp` — an MCP stdio server exposing the same state as Model Context Protocol tools (`cargo run -p aiter-server --bin mcp`)
 
 ## Status
@@ -40,7 +41,7 @@ cp .env.example .env        # then edit .env
 set -a && source .env && set +a
 ```
 
-or export the variables you need directly, e.g. `export PORT=9000`.
+or export the variables you need directly, e.g. `export PORT=9000`. Since #34, `aiter-server` also reads a `KEY=VALUE` config file directly — `./aiter.env` by default, `AITER_CONFIG=<path>` to override; see [Configuration](#configuration-issue-34).
 
 ### 2. Run the server
 
@@ -422,6 +423,52 @@ Details:
 - Credentials are **never logged**: every `Debug` impl and error path redacts the secret.
 - `POST /webhooks/razorpay` is public by design (Razorpay signs deliveries with its own HMAC-SHA256, `x-razorpay-signature`, over the **raw** body — an agent signature cannot produce that). Without `RAZORPAY_WEBHOOK_SECRET` every webhook is refused (**401**, fail closed). `payment.paid` events drive the referenced order (`notes.order_id`) to its paid state and record the payment id; other events are acknowledged and ignored.
 - All money sent to Razorpay is in **minor units** (cents for USD, paise for INR) — `amount: 900` for a $9.00 order.
+
+## Configuration (issue #34)
+
+`aiter-server` reads its configuration from **three layers**, lowest to highest precedence:
+
+| Layer | Source |
+|---|---|
+| 1. **Defaults** | compiled in — `PORT=8080`, `RAZORPAY_MODE=sandbox`, `RAZORPAY_BASE_URL=https://api.razorpay.com`, keys unset |
+| 2. **Config file** | optional `KEY=VALUE` file — `./aiter.env` by default, overridable with the `AITER_CONFIG` env var |
+| 3. **Process env** | the real environment — `PORT` and `RAZORPAY_*` vars |
+
+**Precedence: defaults < config file < process env vars (env wins).** Each key resolves independently (`env var → config file → default`), so a `PORT` env var beats a file `PORT`, which beats the 8080 default — and the same per-key rule applies to every `RAZORPAY_*` variable. Values that appear nowhere fall back to their defaults (or stay unset: the Razorpay keys are only required lazily, when a payment link is minted or a webhook arrives).
+
+Backwards compatible by construction: **when no config file exists, the server is env-only and behaves exactly as before #34** — `PORT` and `RAZORPAY_*` env vars keep working, including the old silent fallback to 8080 for an unparseable `PORT` env var.
+
+### Config file format
+
+- `KEY=VALUE` lines; `#` comments and blank lines are ignored; keys and values are trimmed.
+- Empty values count as unset (a fresh `init` template behaves like a no-file run).
+- Unknown keys are ignored (with a warning) so newer files stay readable by older binaries.
+- A malformed line (no `=`) or an unparseable `PORT` in the file is a **startup error** — typos surface immediately.
+
+Generate a commented template containing every current default:
+
+```bash
+aiter-server init                      # writes ./aiter.env (refuses to overwrite)
+AITER_CONFIG=prod.env aiter-server init   # or write elsewhere
+```
+
+Then edit it and start the server — no shell source-ing needed:
+
+```bash
+aiter-server run                       # `run` is the default; bare `aiter-server` works too
+AITER_CONFIG=prod.env aiter-server run
+```
+
+### CLI
+
+The `aiter-server` binary is a dependency-free `run | init | seed` CLI:
+
+| Command | Behavior |
+|---|---|
+| `aiter-server run` (default) | bind + serve exactly like before (config-file-aware port, `ConnectInfo`); bare `aiter-server` runs this too |
+| `aiter-server init` | write a commented `KEY=VALUE` template with current defaults to the configured path; refuses to overwrite an existing file |
+| `aiter-server seed` | print the embedded demo catalog fixture (`seed::demo_catalog`) — product ids + titles, no server |
+| `aiter-server help` / `-h` | usage text |
 
 ## Agent catalog surface (`aiter-server`)
 
