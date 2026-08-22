@@ -40,10 +40,17 @@
 //! spend cap enforced at checkout completion is the *same* agent identity the
 //! middleware verified against (issues #26/#27 interact by design: the agent
 //! recorded in the receipt/audit log is the one whose signature passed).
+//!
+//! Example clients work out of the box: [`catalog::AppState`] pre-registers a
+//! well-known **demo agent** ([`catalog::DEMO_AGENT_ID`]) whose Ed25519
+//! keypair is derived from a fixed, public seed ([`catalog::demo_agent`]), so
+//! the `aiter-cli` binary can run against a fresh server without any setup
+//! (issue #29). The demo key is public by design — demos and tests only.
 
 pub mod auth;
 pub mod catalog;
 pub mod checkout;
+pub mod cli;
 pub mod mcp;
 pub mod payments;
 pub mod reserve;

@@ -57,13 +57,45 @@ use aiter_core::checkout::CheckoutSession;
 use aiter_core::order::Order;
 use aiter_core::receipt::{AppendOnlyLog, AuditEntry, Receipt};
 use aiter_core::reserve::Consent;
-use aiter_core::signing::AgentIdentity;
+use aiter_core::signing::{AgentIdentity, AgentKeypair};
 use aiter_core::store::{InMemoryStore, Store};
 
 /// Default page size for the catalog feed when `?limit=` is not supplied.
 const DEFAULT_PAGE_LIMIT: usize = 25;
 /// Hard cap so a single response is always bounded (see #43).
 const MAX_PAGE_LIMIT: usize = 100;
+
+/// Well-known demo agent (issue #29).
+///
+/// [`AppState`] pre-registers this agent so the example client (`aiter-cli`)
+/// can run against a fresh server out of the box: its Ed25519 keypair is
+/// derived deterministically from [`DEMO_AGENT_SEED`], a **fixed, public**
+/// seed, and the separate `aiter-cli` process reconstructs the *same* keypair
+/// from that seed without any key exchange. The demo identity is deliberately
+/// **not a secret** — it exists for demos and tests only; production agents
+/// provision their own keys out of band.
+pub const DEMO_AGENT_ID: &str = "agent-demo";
+
+/// Spend cap for the demo agent, in minor units of USD. Generous enough for
+/// any demo flow (cart -> checkout -> payment link) and repeated runs.
+pub const DEMO_AGENT_CAP: i64 = 1_000_000_000;
+
+/// Fixed 32-byte Ed25519 seed for the demo agent. Public by design — see
+/// [`DEMO_AGENT_ID`].
+const DEMO_AGENT_SEED: [u8; 32] = [
+    b'd', b'e', b'm', b'o', b'-', b'a', b'g', b'e', b'n', b't', b'-', b's', b'e', b'e', b'd', 0x00,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+];
+
+/// The demo agent's keypair + identity, derived from [`DEMO_AGENT_SEED`].
+///
+/// The server registers this identity in [`AppState::new`]; the `aiter-cli`
+/// client uses the *same* keypair to sign its writes (issue #29).
+pub fn demo_agent() -> (AgentKeypair, AgentIdentity) {
+    let keypair = AgentKeypair::from_seed(DEMO_AGENT_SEED);
+    let identity = keypair.identity(DEMO_AGENT_ID);
+    (keypair, identity)
+}
 
 /// Shared application state: the in-memory catalog plus the Day-1 checkout
 /// stores (carts / sessions / orders). One state type backs the whole router
@@ -72,7 +104,9 @@ const MAX_PAGE_LIMIT: usize = 100;
 /// catalog and the checkout price source can never diverge. Since Day-2
 /// trust enforcement (issues #25–#27) the state also carries the agent
 /// registry (verifying public key + per-agent spend cap) and the
-/// append-only audit log.
+/// append-only audit log. The well-known demo agent ([`DEMO_AGENT_ID`]) is
+/// pre-registered by [`AppState::new`] so example clients work out of the
+/// box (issue #29).
 #[derive(Clone)]
 pub struct AppState {
     products: Arc<Vec<Product>>,
@@ -102,11 +136,31 @@ pub struct AgentRecord {
 }
 
 impl AppState {
-    /// Build state from a product list (stored id-ascending) plus fresh, empty
-    /// checkout stores, an empty agent registry and an empty audit log.
-    /// Prices are resolved from the served catalog itself.
+    /// Build state from a product list (stored id-ascending) plus fresh
+    /// checkout stores and an empty audit log. Prices are resolved from the
+    /// served catalog itself.
+    ///
+    /// The well-known **demo agent** (issue #29, see [`DEMO_AGENT_ID`]) is
+    /// pre-registered with a generous spend cap, so example clients like
+    /// `aiter-cli` can run against fresh state out of the box — the demo key
+    /// is public by design.
     pub fn new(mut products: Vec<Product>) -> Self {
         products.sort_by(|a, b| a.id.cmp(&b.id));
+
+        // Pre-register the well-known demo agent: its fixed, public keypair is
+        // shared with the example `aiter-cli` client, so a fresh server
+        // accepts that client's signed writes with zero setup (#29).
+        let mut agents = HashMap::new();
+        let (_, identity) = demo_agent();
+        agents.insert(
+            identity.id.clone(),
+            AgentRecord {
+                identity,
+                spend_limit: Amount::new(DEMO_AGENT_CAP, Currency::USD),
+                spent: Amount::zero(Currency::USD),
+            },
+        );
+
         AppState {
             products: Arc::new(products),
             carts: Arc::new(Mutex::new(InMemoryStore::new())),
@@ -114,7 +168,7 @@ impl AppState {
             sessions: Arc::new(Mutex::new(InMemoryStore::new())),
             orders: Arc::new(Mutex::new(InMemoryStore::new())),
             next_id: Arc::new(AtomicU64::new(0)),
-            agents: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(Mutex::new(agents)),
             audit: Arc::new(Mutex::new(AppendOnlyLog::new())),
             consents: Arc::new(Mutex::new(InMemoryStore::new())),
         }
@@ -187,10 +241,12 @@ impl AppState {
 }
 
 impl Default for AppState {
-    /// Shared demo-state reuse path (issue #28): the seeded catalog plus fresh,
-    /// empty checkout stores. Used by the MCP stdio server so it runs against
-    /// the same in-memory state as the HTTP router. Prices come from the served
-    /// catalog itself (`price_of`) — never a separate price book.
+    /// Shared demo-state reuse path (issue #28): the seeded catalog plus fresh
+    /// checkout stores and the pre-registered demo agent (see
+    /// [`AppState::new`]). Used by the MCP stdio server and the `aiter-cli`
+    /// test suite so they run against the same in-memory state as the HTTP
+    /// router. Prices come from the served catalog itself (`price_of`) —
+    /// never a separate price book.
     fn default() -> Self {
         AppState::new(seed_catalog())
     }
