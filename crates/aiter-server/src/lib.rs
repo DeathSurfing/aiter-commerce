@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod checkout;
+pub mod mcp;
 pub mod payments;
 pub mod seed;
 

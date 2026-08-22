@@ -80,7 +80,7 @@ pub struct AppState {
 
 impl AppState {
     /// Build state from a product list (stored id-ascending) plus fresh, empty
-    /// checkout stores and the demo price book.
+    /// checkout stores. Prices are resolved from the served catalog itself.
     pub fn new(mut products: Vec<Product>) -> Self {
         products.sort_by(|a, b| a.id.cmp(&b.id));
         AppState {
@@ -105,6 +105,15 @@ impl AppState {
     }
 }
 
+impl Default for AppState {
+    /// Shared demo-state reuse path (issue #28): the seeded catalog plus fresh,
+    /// empty checkout stores. Used by the MCP stdio server so it runs against
+    /// the same in-memory state as the HTTP router. Prices come from the served
+    /// catalog itself (`price_of`) — never a separate price book.
+    fn default() -> Self {
+        AppState::new(seed_catalog())
+    }
+}
 /// A small inline catalog used to seed state — no external storage required
 /// for the Day-1 read model.
 pub fn seed_catalog() -> Vec<Product> {
