@@ -17,64 +17,15 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
-use tower::ServiceExt;
 
-use aiter_server::auth::{AGENT_ID_HEADER, SIGNATURE_HEADER};
 use aiter_server::catalog::{seed_catalog, AppState};
-
-/// A freshly generated agent keypair + identity under the given id.
-fn new_agent(id: &str) -> (AgentKeypair, AgentIdentity) {
-    let keypair = AgentKeypair::generate();
-    let identity = keypair.identity(id);
-    (keypair, identity)
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Build a signed JSON request. The signature covers method, target URI,
-/// body digest, timestamp and agent id (the origin-form URI here matches what
-/// the server reconstructs for a request without scheme/authority).
-fn signed_request(
-    method: Method,
-    uri: &str,
-    body: Value,
-    keypair: &AgentKeypair,
-    agent_id: &str,
-) -> Request<Body> {
-    let body_str = body.to_string();
-    let signature =
-        keypair.sign_request(agent_id, method.as_str(), uri, body_str.as_bytes(), now());
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header(AGENT_ID_HEADER, agent_id)
-        .header(SIGNATURE_HEADER, serde_json::to_string(&signature).unwrap())
-        .body(Body::from(body_str))
-        .unwrap()
-}
-
-/// Send a request through the router and return (status, JSON body or null).
-async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
+use aiter_server::test_util;
 
 /// A router with `agent_id` registered against a USD spend cap of `cap` minor
 /// units, plus the keypair/identity needed to sign for it.
 async fn app_with_agent(id: &str, cap: i64) -> (Router, AgentKeypair, AgentIdentity) {
     let state = AppState::new(seed_catalog());
-    let (keypair, identity) = new_agent(id);
+    let (keypair, identity) = test_util::new_agent(id);
     state
         .register_agent(identity.clone(), Amount::new(cap, Currency::USD))
         .await;
@@ -89,9 +40,9 @@ async fn checkout_flow(
     agent_id: &str,
     items: Value,
 ) -> (StatusCode, Value, String) {
-    let (status, cart) = send(
+    let (status, cart) = test_util::send(
         app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/carts",
             json!({ "currency": "USD", "items": items }),
@@ -103,9 +54,9 @@ async fn checkout_flow(
     assert_eq!(status, StatusCode::OK, "cart creation should pass");
     let cart_id = cart["id"].as_str().unwrap().to_string();
 
-    let (status, session) = send(
+    let (status, session) = test_util::send(
         app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/checkout_sessions",
             json!({ "cart_id": cart_id }),
@@ -117,9 +68,9 @@ async fn checkout_flow(
     assert_eq!(status, StatusCode::OK, "session creation should pass");
     let cs_id = session["id"].as_str().unwrap().to_string();
 
-    let (status, order) = send(
+    let (status, order) = test_util::send(
         app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             &format!("/checkout_sessions/{cs_id}/complete"),
             json!(null),
@@ -137,7 +88,7 @@ async fn checkout_flow(
 async fn unsigned_write_is_rejected_401() {
     let (app, _, _) = app_with_agent("agent-1", 1_000_000).await;
 
-    let (status, body) = send(
+    let (status, body) = test_util::send(
         &app,
         Request::builder()
             .method(Method::POST)
@@ -155,9 +106,9 @@ async fn unsigned_write_is_rejected_401() {
 async fn signed_write_passes() {
     let (app, keypair, identity) = app_with_agent("agent-1", 1_000_000).await;
 
-    let (status, cart) = send(
+    let (status, cart) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/carts",
             json!({ "currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}] }),
@@ -173,13 +124,13 @@ async fn signed_write_passes() {
 #[tokio::test]
 async fn unknown_agent_is_403() {
     // The signing key is never registered against any agent in the store.
-    let (keypair, identity) = new_agent("ghost");
+    let (keypair, identity) = test_util::new_agent("ghost");
     let state = AppState::new(seed_catalog());
     let app = aiter_server::router(state);
 
-    let (status, _) = send(
+    let (status, _) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/carts",
             json!({ "currency": "USD", "items": [] }),
@@ -197,13 +148,14 @@ async fn tampered_body_is_rejected_401() {
 
     // Sign over the honest body, then ship a different one.
     let honest = json!({ "currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}] });
-    let mut honest_req = signed_request(Method::POST, "/carts", honest, &keypair, &identity.id);
+    let mut honest_req =
+        test_util::signed_request(Method::POST, "/carts", honest, &keypair, &identity.id);
     *honest_req.body_mut() = Body::from(
         json!({ "currency": "USD", "items": [{"product_id": "p-latte", "quantity": 99}] })
             .to_string(),
     );
 
-    let (status, _) = send(&app, honest_req).await;
+    let (status, _) = test_util::send(&app, honest_req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -220,7 +172,7 @@ async fn public_endpoints_are_reachable_without_signature() {
         "/llms.txt",
         "/seed/catalog",
     ] {
-        let (status, _) = send(
+        let (status, _) = test_util::send(
             &app,
             Request::builder().uri(uri).body(Body::empty()).unwrap(),
         )
@@ -230,9 +182,9 @@ async fn public_endpoints_are_reachable_without_signature() {
 
     // GET cart reads are public too (documented read side of the split): an
     // unsigned read of a cart created by a signed write must succeed.
-    let (status, cart) = send(
+    let (status, cart) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/carts",
             json!({ "currency": "USD", "items": [] }),
@@ -244,7 +196,7 @@ async fn public_endpoints_are_reachable_without_signature() {
     assert_eq!(status, StatusCode::OK);
     let cart_id = cart["id"].as_str().unwrap().to_string();
 
-    let (status, _) = send(
+    let (status, _) = test_util::send(
         &app,
         Request::builder()
             .uri(format!("/carts/{cart_id}"))
@@ -321,7 +273,7 @@ async fn spend_caps_are_configurable_per_agent() {
 #[tokio::test]
 async fn completed_checkout_emits_exactly_one_receipt_to_the_audit_log() {
     let state = AppState::new(seed_catalog());
-    let (keypair, identity) = new_agent("agent-1");
+    let (keypair, identity) = test_util::new_agent("agent-1");
     state
         .register_agent(identity.clone(), Amount::new(1_000_000, Currency::USD))
         .await;
@@ -355,9 +307,9 @@ async fn completed_checkout_emits_exactly_one_receipt_to_the_audit_log() {
 
     // Idempotent re-completion of the SAME session: same order, no second
     // audit entry and no double charge.
-    let (status, order2) = send(
+    let (status, order2) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             &format!("/checkout_sessions/{cs_id}/complete"),
             json!(null),
@@ -378,7 +330,7 @@ async fn completed_checkout_emits_exactly_one_receipt_to_the_audit_log() {
 #[tokio::test]
 async fn over_limit_checkout_emits_no_receipt() {
     let state = AppState::new(seed_catalog());
-    let (keypair, identity) = new_agent("agent-1");
+    let (keypair, identity) = test_util::new_agent("agent-1");
     state
         .register_agent(identity.clone(), Amount::new(150, Currency::USD))
         .await;

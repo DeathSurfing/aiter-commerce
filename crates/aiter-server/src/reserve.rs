@@ -39,18 +39,12 @@ use std::sync::atomic::Ordering;
 use aiter_core::amount::{Amount, Currency};
 use aiter_core::reserve::{Consent, ConsentStatus};
 use aiter_core::store::{Store, StoreError};
+use aiter_core::util::now;
 
 use crate::catalog::AppState;
 
 /// Store default currency for consents: matches the seeded catalog (USD).
 const DEFAULT_CURRENCY: Currency = Currency::USD;
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 // ---------------------------------------------------------------------------
 // Consent capture
@@ -272,72 +266,15 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use crate::catalog::seed_catalog;
-    use aiter_core::signing::{AgentIdentity, AgentKeypair};
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Method, Request};
+    use crate::test_util::{call, register_test_agent};
+    use axum::http::Method;
     use axum::Router;
-    use std::sync::OnceLock;
-    use tower::ServiceExt;
-
-    /// The demo agent every test request is signed by (issue #25 middleware
-    /// guards all write routes). Registered by each `app()`.
-    fn demo_agent() -> &'static (AgentKeypair, AgentIdentity) {
-        static AGENT: OnceLock<(AgentKeypair, AgentIdentity)> = OnceLock::new();
-        AGENT.get_or_init(|| {
-            let keypair = AgentKeypair::generate();
-            let identity = keypair.identity("agent-1");
-            (keypair, identity)
-        })
-    }
-
-    /// Send a request signed by the demo agent. `uri` is the origin-form path
-    /// (including any query string), which is what the server reconstructs as
-    /// the signed target URI.
-    async fn call(
-        app: &Router,
-        method: Method,
-        uri: &str,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        let (keypair, identity) = demo_agent();
-        let body_str = body.map(|b| b.to_string()).unwrap_or_default();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let signature = keypair.sign_request(
-            &identity.id,
-            method.as_str(),
-            uri,
-            body_str.as_bytes(),
-            timestamp,
-        );
-
-        let mut builder = Request::builder().method(method).uri(uri);
-        if !body_str.is_empty() {
-            builder = builder.header("content-type", "application/json");
-        }
-        builder = builder
-            .header(super::super::auth::AGENT_ID_HEADER, &identity.id)
-            .header(
-                super::super::auth::SIGNATURE_HEADER,
-                serde_json::to_string(&signature).unwrap(),
-            );
-        let req = builder.body(Body::from(body_str)).unwrap();
-
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, json)
-    }
+    use serde_json::Value;
 
     async fn app() -> Router {
         let st = AppState::new(seed_catalog());
-        let (_, identity) = demo_agent();
         // Register the demo agent so signed writes pass the middleware.
-        st.register_agent(identity.clone(), Amount::new(1_000_000, Currency::USD))
-            .await;
+        register_test_agent(&st).await;
         crate::router(st)
     }
 
@@ -501,9 +438,7 @@ mod tests {
     #[tokio::test]
     async fn revoked_consent_is_403() {
         let st = AppState::new(seed_catalog());
-        let (_, identity) = demo_agent();
-        st.register_agent(identity.clone(), Amount::new(1_000_000, Currency::USD))
-            .await;
+        register_test_agent(&st).await;
         let app = crate::router(st.clone());
 
         let (status, consent) = create_consent(&app, 5_000, "mobile").await;

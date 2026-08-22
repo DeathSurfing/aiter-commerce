@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 
 use aiter_core::amount::{Amount, Currency};
 use aiter_core::order::OrderStatus;
-use aiter_core::signing::AgentKeypair;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::routing::post;
@@ -24,10 +23,11 @@ use axum::{Json, Router};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use tower::ServiceExt;
 
-use aiter_server::auth::{AGENT_ID_HEADER, SIGNATURE_HEADER};
+use aiter_core::signing::AgentKeypair;
+
 use aiter_server::catalog::{seed_catalog, AppState};
+use aiter_server::test_util;
 
 /// Webhook secret the fixture signature is computed with — must match the
 /// `RAZORPAY_WEBHOOK_SECRET` the server is configured with.
@@ -47,49 +47,6 @@ fn fixture_signature(body: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-/// Build a signed JSON request. The signature covers method, target URI,
-/// body digest, timestamp and agent id; the origin-form URI here matches what
-/// the server reconstructs for a request without scheme/authority.
-fn signed_request(
-    method: Method,
-    uri: &str,
-    body: Value,
-    keypair: &AgentKeypair,
-    agent_id: &str,
-) -> Request<Body> {
-    let body_str = body.to_string();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let signature = keypair.sign_request(
-        agent_id,
-        method.as_str(),
-        uri,
-        body_str.as_bytes(),
-        timestamp,
-    );
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header(AGENT_ID_HEADER, agent_id)
-        .header(SIGNATURE_HEADER, serde_json::to_string(&signature).unwrap())
-        .body(Body::from(body_str))
-        .unwrap()
-}
-
-/// Send a request through the router and return (status, JSON body or null).
-async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
 }
 
 /// A Razorpay `payment.paid` webhook delivery, signed with [`WEBHOOK_SECRET`]
@@ -160,7 +117,7 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     let app = aiter_server::router(state.clone());
 
     // --- 1. Browse the (public) catalog; pick p-latte @ $4.50 --------------
-    let (status, catalog) = send(
+    let (status, catalog) = test_util::send(
         &app,
         Request::builder()
             .uri("/catalog/products")
@@ -178,9 +135,9 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     assert_eq!(latte["price"]["units"], 450, "p-latte unit price");
 
     // --- 2. Add 2x p-latte to a cart -> subtotal 900 -----------------------
-    let (status, cart) = send(
+    let (status, cart) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/carts",
             json!({
@@ -198,9 +155,9 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     assert_eq!(cart["totals"]["total"]["units"], 900);
 
     // --- 3. Snapshot the cart into a checkout session ----------------------
-    let (status, session) = send(
+    let (status, session) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             "/checkout_sessions",
             json!({ "cart_id": cart_id }),
@@ -214,9 +171,9 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     assert_eq!(session["totals"]["total"]["units"], 900);
 
     // --- 4. Complete checkout -> order Placed, totals 900 ------------------
-    let (status, order) = send(
+    let (status, order) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             &format!("/checkout_sessions/{cs_id}/complete"),
             json!(null),
@@ -231,9 +188,9 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     assert_eq!(order["totals"]["total"]["units"], 900);
 
     // --- 5. Mint a payment link against the MOCK -> fixed short_url --------
-    let (status, link) = send(
+    let (status, link) = test_util::send(
         &app,
-        signed_request(
+        test_util::signed_request(
             Method::POST,
             &format!("/orders/{order_id}/payment_link"),
             json!(null),
@@ -253,7 +210,7 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     assert_eq!(sent["notes"]["order_id"], order_id);
 
     // --- 6. Verified payment.paid webhook -> order Confirmed + paid --------
-    let (status, receipt) = send(&app, signed_webhook_request(&order_id)).await;
+    let (status, receipt) = test_util::send(&app, signed_webhook_request(&order_id)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(receipt["received"], true);
     assert_eq!(receipt["payment_id"], "pay_e2e_123");
@@ -265,7 +222,7 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     assert_eq!(paid.timeline.len(), 2, "Placed + one Confirm transition");
 
     // --- 7. Idempotency: re-delivery changes nothing -----------------------
-    let (status, receipt) = send(&app, signed_webhook_request(&order_id)).await;
+    let (status, receipt) = test_util::send(&app, signed_webhook_request(&order_id)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(receipt["status"], "already_paid");
 
@@ -283,7 +240,7 @@ async fn agent_lists_catalog_buys_and_order_is_paid_via_verified_webhook() {
     tampered
         .headers_mut()
         .insert("x-razorpay-signature", "deadbeef".parse().unwrap());
-    let (status, _) = send(&app, tampered).await;
+    let (status, _) = test_util::send(&app, tampered).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let untouched = state.order(&order_id).await.unwrap();
     assert_eq!(untouched.status, OrderStatus::Confirmed);

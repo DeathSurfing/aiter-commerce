@@ -14,6 +14,7 @@
 
 use std::fmt;
 
+use aiter_core::util::now;
 use serde_json::{json, Value};
 
 use crate::auth::{AGENT_ID_HEADER, SIGNATURE_HEADER};
@@ -47,7 +48,8 @@ pub struct SignedRequest {
 pub fn build_signed_request(uri: &str, body: Value) -> SignedRequest {
     let (keypair, identity) = demo_agent();
     let body_str = body.to_string();
-    let signature = keypair.sign_request(&identity.id, "POST", uri, body_str.as_bytes(), now());
+    let signature =
+        keypair.sign_request(&identity.id, "POST", uri, body_str.as_bytes(), now() as u64);
     SignedRequest {
         method: "POST",
         uri: uri.to_string(),
@@ -259,12 +261,4 @@ fn str_field(value: &Value, field: &str, what: &str) -> Result<String, CliError>
 /// Cap error bodies so a hostile/broken server cannot flood the terminal.
 fn truncate(text: &str) -> String {
     text.chars().take(512).collect()
-}
-
-/// Unix seconds — the timestamp convention used across the checkout flow.
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }

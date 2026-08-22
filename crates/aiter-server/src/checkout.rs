@@ -32,6 +32,7 @@ use aiter_core::order::Order;
 use aiter_core::pricing::{compute_totals, NoTax, PricingError, Totals};
 use aiter_core::receipt::Receipt;
 use aiter_core::store::{Store, StoreError};
+use aiter_core::util::now;
 
 use crate::auth::VerifiedAgent;
 use crate::catalog::AppState;
@@ -190,13 +191,6 @@ pub(crate) struct CreateSessionRequest {
     cart_id: String,
     #[serde(default)]
     fulfillment: Option<Fulfillment>,
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// `POST /checkout_sessions` — snapshot a cart into a new checkout session.
@@ -449,78 +443,14 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use crate::catalog::seed_catalog;
-    use aiter_core::amount::Amount;
+    use crate::test_util::{call, register_test_agent};
     use aiter_core::order::OrderStatus;
-    use aiter_core::signing::{AgentIdentity, AgentKeypair};
-    use axum::body::{to_bytes, Body};
-    use axum::http::{Method, Request};
+    use axum::http::Method;
     use axum::Router;
-    use serde_json::Value;
-    use std::sync::OnceLock;
-    use tower::ServiceExt;
-
-    /// The demo agent every test request is signed by. One keypair per test
-    /// process; registered (with a generous spend cap) by each `app()`.
-    fn demo_agent() -> &'static (AgentKeypair, AgentIdentity) {
-        static AGENT: OnceLock<(AgentKeypair, AgentIdentity)> = OnceLock::new();
-        AGENT.get_or_init(|| {
-            let keypair = AgentKeypair::generate();
-            let identity = keypair.identity("agent-1");
-            (keypair, identity)
-        })
-    }
-
-    /// Demo spend cap for the shared test agent (plenty for the existing flows).
-    const DEMO_CAP: i64 = 1_000_000;
-
-    /// Send a request signed by the demo agent (issue #25 middleware requires
-    /// it on every write route). `uri` is the origin-form path, which is what
-    /// the server reconstructs as the signed target URI.
-    async fn call(
-        app: &Router,
-        method: Method,
-        uri: &str,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        let (keypair, identity) = demo_agent();
-        let has_body = body.is_some();
-        let body_str = body.map(|b| b.to_string()).unwrap_or_default();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let signature = keypair.sign_request(
-            &identity.id,
-            method.as_str(),
-            uri,
-            body_str.as_bytes(),
-            timestamp,
-        );
-
-        let mut builder = Request::builder().method(method).uri(uri);
-        if has_body {
-            builder = builder.header("content-type", "application/json");
-        }
-        builder = builder
-            .header(super::super::auth::AGENT_ID_HEADER, &identity.id)
-            .header(
-                super::super::auth::SIGNATURE_HEADER,
-                serde_json::to_string(&signature).unwrap(),
-            );
-        let req = builder.body(Body::from(body_str)).unwrap();
-
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, json)
-    }
 
     async fn app() -> Router {
         let st = AppState::new(seed_catalog());
-        let (_, identity) = demo_agent();
-        st.register_agent(identity.clone(), Amount::new(DEMO_CAP, Currency::USD))
-            .await;
+        register_test_agent(&st).await;
         crate::router(st)
     }
 
@@ -625,9 +555,7 @@ mod tests {
     #[tokio::test]
     async fn checkout_complete_produces_order_with_correct_totals() {
         let st = AppState::new(seed_catalog());
-        let (_, identity) = demo_agent();
-        st.register_agent(identity.clone(), Amount::new(DEMO_CAP, Currency::USD))
-            .await;
+        register_test_agent(&st).await;
         let app = crate::router(st.clone());
 
         // Cart: p-latte x 2 ($4.50 each) + p-coldbrew x 1 ($5.00) => subtotal 1400.
