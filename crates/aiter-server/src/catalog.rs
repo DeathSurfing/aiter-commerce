@@ -60,6 +60,8 @@ use aiter_core::reserve::Consent;
 use aiter_core::signing::{AgentIdentity, AgentKeypair};
 use aiter_core::store::{InMemoryStore, Store};
 
+use crate::rate_limit::{env_u32, RateLimiter, DEFAULT_READS_PER_MIN, DEFAULT_WRITES_PER_MIN};
+
 /// Default page size for the catalog feed when `?limit=` is not supplied.
 const DEFAULT_PAGE_LIMIT: usize = 25;
 /// Hard cap so a single response is always bounded (see #43).
@@ -122,6 +124,10 @@ pub struct AppState {
     pub(crate) audit: Arc<Mutex<AppendOnlyLog<Receipt>>>,
     /// UPI Reserve Pay consent ledger (#22): consent id -> one-time mandate.
     pub(crate) consents: Arc<Mutex<InMemoryStore<String, Consent>>>,
+    /// Write-tier rate limiter (per verified agent, issue #35).
+    pub(crate) write_limiter: RateLimiter,
+    /// Read-tier rate limiter (per client IP, issue #35).
+    pub(crate) read_limiter: RateLimiter,
 }
 
 /// A registered agent: the public identity used to verify its signed requests
@@ -140,11 +146,31 @@ impl AppState {
     /// checkout stores and an empty audit log. Prices are resolved from the
     /// served catalog itself.
     ///
+    /// Rate limits come from `RATE_LIMIT_WRITES_PER_MIN` /
+    /// `RATE_LIMIT_READS_PER_MIN` (defaults 60/120, see
+    /// [`crate::rate_limit`]); tests that need a tiny quota use
+    /// [`AppState::with_rate_limits`] instead.
+    ///
     /// The well-known **demo agent** (issue #29, see [`DEMO_AGENT_ID`]) is
     /// pre-registered with a generous spend cap, so example clients like
     /// `aiter-cli` can run against fresh state out of the box — the demo key
     /// is public by design.
-    pub fn new(mut products: Vec<Product>) -> Self {
+    pub fn new(products: Vec<Product>) -> Self {
+        AppState::with_rate_limits(
+            products,
+            env_u32("RATE_LIMIT_WRITES_PER_MIN", DEFAULT_WRITES_PER_MIN),
+            env_u32("RATE_LIMIT_READS_PER_MIN", DEFAULT_READS_PER_MIN),
+        )
+    }
+
+    /// Like [`AppState::new`] but with explicit per-minute quotas for the two
+    /// rate-limiting tiers (issue #35) instead of env-config'ed defaults —
+    /// the knob tests use to set a tiny limit without touching process env.
+    pub fn with_rate_limits(
+        mut products: Vec<Product>,
+        writes_per_min: u32,
+        reads_per_min: u32,
+    ) -> Self {
         products.sort_by(|a, b| a.id.cmp(&b.id));
 
         // Pre-register the well-known demo agent: its fixed, public keypair is
@@ -171,6 +197,8 @@ impl AppState {
             agents: Arc::new(Mutex::new(agents)),
             audit: Arc::new(Mutex::new(AppendOnlyLog::new())),
             consents: Arc::new(Mutex::new(InMemoryStore::new())),
+            write_limiter: RateLimiter::new(writes_per_min),
+            read_limiter: RateLimiter::new(reads_per_min),
         }
     }
 
