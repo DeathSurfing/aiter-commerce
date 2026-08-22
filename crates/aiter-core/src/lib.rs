@@ -5,8 +5,9 @@
 //! merchant needs to be "AI-buyable".
 //!
 //! This crate is intentionally dependency-light (`serde` + `serde_json` for
-//! wire-format round-tripping, plus the `ed25519-dalek`/`sha2`/`base64` stack
-//! used by [`signing`] for agent identity). Protocol/schema code that can live
+//! wire-format round-tripping, the `ed25519-dalek`/`sha2`/`base64` stack used
+//! by [`signing`] for agent identity, and `sled` for the durable [`store`]).
+//! Protocol/schema code that can live
 //! without framework baggage belongs here; HTTP/runtime concerns live in
 //! `aiter-server`.
 //!
