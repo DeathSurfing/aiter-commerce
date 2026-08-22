@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# `cargo run -p aiter-server` should keep starting the HTTP server even though
+# the package now ships three binaries (aiter-server, aiter-cli, mcp).
+default-run = "aiter-server"
 
 [dependencies]
 aiter-core = { path = "../aiter-core" }

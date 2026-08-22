@@ -94,6 +94,19 @@ impl AgentKeypair {
         }
     }
 
+    /// Deterministically derive a keypair from a fixed 32-byte seed.
+    ///
+    /// The seed is **not** a secret — anyone holding it can reconstruct the
+    /// signing key — so this is for well-known demo identities and tests only.
+    /// The demo agent (issue #29) works because the merchant and the example
+    /// client agree on one fixed public seed, giving both processes the same
+    /// keypair without any key exchange.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(&seed),
+        }
+    }
+
     /// Derive the public [`AgentIdentity`] (id + public key) for this keypair.
     pub fn identity(&self, id: impl Into<String>) -> AgentIdentity {
         AgentIdentity {
@@ -202,6 +215,27 @@ mod tests {
         let identity = keypair.identity("agent-1");
         let signature = keypair.sign_request("agent-1", METHOD, TARGET_URI, BODY, TIMESTAMP);
 
+        assert_eq!(
+            verify_request(&identity, &signature, METHOD, TARGET_URI, BODY),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn from_seed_is_deterministic_and_signs() {
+        let seed = [7u8; 32];
+        let first = AgentKeypair::from_seed(seed);
+        let second = AgentKeypair::from_seed(seed);
+
+        assert_eq!(
+            first.identity("agent-demo"),
+            second.identity("agent-demo"),
+            "the same seed must always derive the same identity"
+        );
+
+        // The seeded keypair is fully functional: sign + verify round-trips.
+        let identity = first.identity("agent-demo");
+        let signature = first.sign_request("agent-demo", METHOD, TARGET_URI, BODY, TIMESTAMP);
         assert_eq!(
             verify_request(&identity, &signature, METHOD, TARGET_URI, BODY),
             Ok(())

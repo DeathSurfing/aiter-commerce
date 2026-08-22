@@ -130,6 +130,37 @@ Then:
 - `GET /` — service info
 - `GET /agentic/health` — liveness + version
 
+### Demo agent (issue #29)
+
+The server pre-registers a well-known **demo agent** so example clients can
+run against it with zero setup: id `agent-demo`, whose Ed25519 keypair is
+derived from a **fixed, public seed** (`DEMO_AGENT_SEED` in
+`crates/aiter-server/src/catalog.rs`). The demo key is deliberately **not a
+secret** — anyone can reconstruct it from the source — so it is for demos and
+tests only; production agents provision their own keys out of band.
+
+### Example agent client (`aiter-cli`, issue #29)
+
+With the server running (and `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET`
+sandbox keys set), one command buys a product and prints a real payment
+link:
+
+```bash
+# first catalog product, qty 1
+cargo run --bin aiter-cli -- --base http://localhost:8080
+
+# a specific product and quantity
+cargo run --bin aiter-cli -- --base http://localhost:8080 p-latte 2
+```
+
+The CLI discovers the catalog, builds a signed cart, creates and completes a
+signed checkout session, mints a signed payment link, and prints its
+`short_url` (plus the order id). Every write carries the demo agent's
+signature (`x-agent-id` + `x-request-signature` headers), which
+`AppState::default()` registers; a server that does not know the demo agent
+rejects the writes with `401`/`403` and the CLI prints a hint pointing at the
+registration.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
