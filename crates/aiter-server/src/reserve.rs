@@ -75,6 +75,7 @@ pub(crate) async fn create_consent(
     State(st): State<AppState>,
     Json(body): Json<ConsentRequest>,
 ) -> Result<Json<Consent>, ApiError> {
+    validate_positive_minor(body.spend_limit_minor, "spend_limit_minor")?;
     let currency = body.currency.unwrap_or(DEFAULT_CURRENCY);
     let spend_limit = Amount::new(body.spend_limit_minor, currency);
     let id = st.gen_id("cons");
@@ -137,6 +138,8 @@ pub(crate) async fn debit(
     Query(query): Query<DebitQuery>,
     Json(body): Json<DebitRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_positive_minor(body.amount_minor, "amount_minor")?;
+
     // Observability (issue #33): one span per debit attempt, success or not.
     let span = tracing::info_span!(
         "reserve_debit",
@@ -144,7 +147,6 @@ pub(crate) async fn debit(
         amount_minor = body.amount_minor
     );
     let _guard = span.enter();
-
     let mut consents = st.consents.lock().await;
     let consent = consents
         .get(&body.consent_id)
@@ -202,6 +204,25 @@ pub(crate) enum ApiError {
     DeviceMismatch,
     /// Debit currency differs from the consent's limit currency.
     CurrencyMismatch(Currency),
+    /// A minor-unit amount was not a positive integer (negative debits would
+    /// inflate the remaining limit; non-positive spend limits are meaningless).
+    InvalidAmount(String),
+}
+
+/// Reject non-positive minor-unit amounts before any ledger math (#36).
+///
+/// A negative `amount_minor` would pass the `> remaining` guard and then
+/// *decrease* `total_spent`, inflating the consent's remaining limit — the
+/// agent could mint spend headroom out of thin air. A non-positive spend
+/// limit is equally meaningless. Both cart mutators' sibling checks use this
+/// one guard so every money-taking route rejects `<= 0` the same way.
+fn validate_positive_minor(units: i64, field: &str) -> Result<(), ApiError> {
+    if units <= 0 {
+        return Err(ApiError::InvalidAmount(format!(
+            "{field} must be a positive integer number of minor units, got {units}"
+        )));
+    }
+    Ok(())
 }
 
 impl From<StoreError> for ApiError {
@@ -239,6 +260,9 @@ impl IntoResponse for ApiError {
                 StatusCode::FORBIDDEN,
                 json!({"error": "currency mismatch", "limit_currency": currency.code()}),
             ),
+            ApiError::InvalidAmount(message) => {
+                (StatusCode::BAD_REQUEST, json!({ "error": message }))
+            }
         };
         (code, Json(body)).into_response()
     }

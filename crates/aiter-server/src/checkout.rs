@@ -71,14 +71,30 @@ fn cart_response(st: &AppState, id: &str, cart: &Cart, cancelled: bool) -> CartR
     }
 }
 
-/// Reject any line item whose product id is not in the served catalog.
+/// Reject any line item whose product id is not in the served catalog, or
+/// whose price currency differs from the cart's currency (#36).
 ///
-/// Both cart mutators call this up front so an unknown id is a 400 with a
-/// clear error, never a 200 cart with `totals: null`.
-fn validate_catalog_items(st: &AppState, items: &[LineItem]) -> Result<(), ApiError> {
+/// Both cart mutators call this up front so an unknown id or a cross-currency
+/// line is a 400 with a clear error, never a 200 cart with `totals: null`
+/// (a mixed-currency cart cannot be priced — subtotal math refuses to combine
+/// currencies, which would otherwise surface only later as a null-totals
+/// cart or a session-time 400).
+fn validate_catalog_items(
+    st: &AppState,
+    currency: Currency,
+    items: &[LineItem],
+) -> Result<(), ApiError> {
     for item in items {
-        if st.price_of(&item.product_id).is_none() {
-            return Err(ApiError::UnknownProduct(item.product_id.clone()));
+        match st.price_of(&item.product_id) {
+            None => return Err(ApiError::UnknownProduct(item.product_id.clone())),
+            Some(price) if price.currency() != currency => {
+                return Err(ApiError::CurrencyMismatch {
+                    product_id: item.product_id.clone(),
+                    expected: currency,
+                    got: price.currency(),
+                });
+            }
+            Some(_) => {}
         }
     }
     Ok(())
@@ -90,7 +106,7 @@ pub(crate) async fn create_cart(
     Json(body): Json<CreateCartRequest>,
 ) -> Result<Json<CartResponse>, ApiError> {
     let currency = body.currency.unwrap_or(Currency::USD);
-    validate_catalog_items(&st, &body.items)?;
+    validate_catalog_items(&st, currency, &body.items)?;
     let mut cart = Cart::new(currency);
     for item in body.items {
         cart.update(&item.product_id, item.quantity);
@@ -134,8 +150,9 @@ pub(crate) async fn update_cart(
 ) -> Result<Json<CartResponse>, ApiError> {
     let mut stores = st.carts.lock().await;
     let cart = stores.get(&id).cloned().ok_or(ApiError::NotFound)?;
-    // Reject unknown product ids up front (400), never a null-totals cart.
-    validate_catalog_items(&st, &body.items)?;
+    // Reject unknown product ids / cross-currency lines up front (400),
+    // never a null-totals cart.
+    validate_catalog_items(&st, cart.currency, &body.items)?;
     let mut updated = Cart::new(cart.currency);
     for item in body.items {
         updated.update(&item.product_id, item.quantity);
@@ -351,6 +368,12 @@ pub(crate) enum ApiError {
     Razorpay(RazorpayError),
     /// A cart line references a product id that is not in the served catalog.
     UnknownProduct(String),
+    /// A cart line's price currency differs from the cart's currency (#36).
+    CurrencyMismatch {
+        product_id: String,
+        expected: Currency,
+        got: Currency,
+    },
     /// Spend-cap enforcement at checkout completion (issue #26).
     SpendLimit(String),
 }
@@ -403,6 +426,19 @@ impl IntoResponse for ApiError {
             ApiError::UnknownProduct(id) => {
                 (StatusCode::BAD_REQUEST, format!("unknown product: {id}"))
             }
+            ApiError::CurrencyMismatch {
+                product_id,
+                expected,
+                got,
+            } => (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "product {product_id} is priced in {} but the cart is in {}; \
+                     refusing to price a mixed-currency cart",
+                    got.code(),
+                    expected.code()
+                ),
+            ),
             ApiError::SpendLimit(m) => (StatusCode::FORBIDDEN, m),
         };
         (code, Json(json!({ "error": message }))).into_response()
