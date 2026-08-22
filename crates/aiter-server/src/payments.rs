@@ -32,7 +32,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Default Razorpay API base URL. Razorpay serves both sandbox (test keys,
 /// `rzp_test_…`) and live (`rzp_live_…`) from the same host; the key pair
 /// selects the mode. Override with `RAZORPAY_BASE_URL` for gateways/proxies.
-const DEFAULT_BASE_URL: &str = "https://api.razorpay.com";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.razorpay.com";
 
 /// Payment mode: explicit sandbox vs live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +136,20 @@ impl RazorpayClient {
     /// Build a client from the environment (see [`RazorpayConfig::from_env`]).
     pub fn from_env() -> Result<Self, RazorpayError> {
         Ok(RazorpayClient::new(RazorpayConfig::from_env()?))
+    }
+
+    /// Build a client from an [`AppState`]'s resolved Razorpay settings
+    /// (issue #34): when the server was started with externally-loaded
+    /// config (`defaults < config file < env`), those settings are used;
+    /// otherwise (`None` — the legacy path taken by tests and the `mcp` /
+    /// `aiter-cli` binaries) this falls back to [`RazorpayClient::from_env`],
+    /// i.e. reads `RAZORPAY_*` env vars live per request, exactly as before
+    /// the config loader existed.
+    pub fn for_state(state: &AppState) -> Result<Self, RazorpayError> {
+        match &state.razorpay {
+            Some(settings) => Ok(RazorpayClient::new(settings.to_razorpay_config()?)),
+            None => RazorpayClient::from_env(),
+        }
     }
 
     /// Create an order and return its `order_id`.
@@ -543,7 +557,7 @@ pub(crate) async fn order_payment_link(
             "order is already paid; refusing to mint a new payment link".to_string(),
         ));
     }
-    let client = RazorpayClient::from_env()?;
+    let client = RazorpayClient::for_state(&st)?;
     let short_url = client
         .create_payment_link(
             order.totals.total.units,
@@ -580,7 +594,7 @@ pub(crate) async fn razorpay_webhook(
             )
         })?;
 
-    let client = RazorpayClient::from_env().map_err(razorpay_error_response)?;
+    let client = RazorpayClient::for_state(&st).map_err(razorpay_error_response)?;
     let outcome = process_payment_webhook(&st, &client, &body, signature)
         .await
         .map_err(webhook_error_response)?;

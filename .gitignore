@@ -7,6 +7,9 @@ Cargo.lock.orig
 .env
 .env.*
 !.env.example
+# External config loader (issue #34) — aiter-server init writes this; it can
+# hold real Razorpay secrets, so never commit it.
+aiter.env
 
 # Editors / OS
 .idea/

@@ -60,6 +60,7 @@ use aiter_core::reserve::Consent;
 use aiter_core::signing::{AgentIdentity, AgentKeypair};
 use aiter_core::store::{InMemoryStore, Store};
 
+use crate::config::RazorpaySettings;
 use crate::metrics::Metrics;
 use crate::rate_limit::{env_u32, RateLimiter, DEFAULT_READS_PER_MIN, DEFAULT_WRITES_PER_MIN};
 
@@ -131,6 +132,12 @@ pub struct AppState {
     pub(crate) write_limiter: RateLimiter,
     /// Read-tier rate limiter (per client IP, issue #35).
     pub(crate) read_limiter: RateLimiter,
+    /// Resolved Razorpay settings from the external config loader (issue
+    /// #34). `None` keeps the legacy behavior — payment handlers read
+    /// `RAZORPAY_*` env vars live per request, exactly as before the config
+    /// loader existed. `Some` (set by [`AppState::with_razorpay_settings`],
+    /// i.e. by `aiter-server run`) uses the env-overlaid file settings.
+    pub(crate) razorpay: Option<RazorpaySettings>,
 }
 
 /// A registered agent: the public identity used to verify its signed requests
@@ -203,7 +210,28 @@ impl AppState {
             metrics: Arc::new(Metrics::default()),
             write_limiter: RateLimiter::new(writes_per_min),
             read_limiter: RateLimiter::new(reads_per_min),
+            razorpay: None,
         }
+    }
+
+    /// Like [`AppState::new`] but with externally-loaded Razorpay settings
+    /// (issue #34): `Some(settings)` makes the payment handlers build their
+    /// client from the resolved config (`defaults < config file < env`,
+    /// already applied by [`crate::config::Config::load`]); `None` keeps the
+    /// legacy behavior — handlers read `RAZORPAY_*` env vars live per
+    /// request. `aiter-server run` always passes `Some(...)`; tests and the
+    /// `mcp` / `aiter-cli` binaries keep using [`AppState::new`].
+    pub fn with_razorpay_settings(
+        products: Vec<Product>,
+        razorpay: Option<RazorpaySettings>,
+    ) -> Self {
+        let mut state = AppState::with_rate_limits(
+            products,
+            env_u32("RATE_LIMIT_WRITES_PER_MIN", DEFAULT_WRITES_PER_MIN),
+            env_u32("RATE_LIMIT_READS_PER_MIN", DEFAULT_READS_PER_MIN),
+        );
+        state.razorpay = razorpay;
+        state
     }
 
     /// Generate the next sequential id for a store (`cart-0`, `cs-1`, ...).
