@@ -12,7 +12,8 @@
 //! * `POST /checkout_sessions/{id}/cancel` — cancel a session (idempotent).
 //!
 //! All state lives in the shared [`AppState`] defined in [`crate::catalog`]:
-//! the in-memory cart / session / order stores plus the demo price book.
+//! the in-memory cart / session / order stores; unit prices resolve from the
+//! served catalog (`AppState::price_of`), never a separate price book.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -55,7 +56,7 @@ pub(crate) struct CartResponse {
     totals: Option<Totals>,
 }
 
-/// Build a [`CartResponse`] with totals re-derived from the price book.
+/// Build a [`CartResponse`] with totals re-derived from the catalog.
 fn cart_response(st: &AppState, id: &str, cart: &Cart, cancelled: bool) -> CartResponse {
     let totals = compute_totals(cart, |p| st.price_of(p), &NoTax).ok();
     CartResponse {
@@ -66,12 +67,26 @@ fn cart_response(st: &AppState, id: &str, cart: &Cart, cancelled: bool) -> CartR
     }
 }
 
+/// Reject any line item whose product id is not in the served catalog.
+///
+/// Both cart mutators call this up front so an unknown id is a 400 with a
+/// clear error, never a 200 cart with `totals: null`.
+fn validate_catalog_items(st: &AppState, items: &[LineItem]) -> Result<(), ApiError> {
+    for item in items {
+        if st.price_of(&item.product_id).is_none() {
+            return Err(ApiError::UnknownProduct(item.product_id.clone()));
+        }
+    }
+    Ok(())
+}
+
 /// `POST /carts` — create a cart, returning its id.
 pub(crate) async fn create_cart(
     State(st): State<AppState>,
     Json(body): Json<CreateCartRequest>,
 ) -> Result<Json<CartResponse>, ApiError> {
     let currency = body.currency.unwrap_or(Currency::USD);
+    validate_catalog_items(&st, &body.items)?;
     let mut cart = Cart::new(currency);
     for item in body.items {
         cart.update(&item.product_id, item.quantity);
@@ -115,12 +130,12 @@ pub(crate) async fn update_cart(
 ) -> Result<Json<CartResponse>, ApiError> {
     let mut stores = st.carts.lock().await;
     let cart = stores.get(&id).cloned().ok_or(ApiError::NotFound)?;
+    // Reject unknown product ids up front (400), never a null-totals cart.
+    validate_catalog_items(&st, &body.items)?;
     let mut updated = Cart::new(cart.currency);
     for item in body.items {
         updated.update(&item.product_id, item.quantity);
     }
-    // Re-derive totals: reject carts that contain unpriced products.
-    compute_totals(&updated, |p| st.price_of(p), &NoTax).map_err(ApiError::Pricing)?;
     stores
         .update(id.clone(), updated.clone())
         .map_err(ApiError::Store)?;
@@ -275,6 +290,8 @@ pub(crate) enum ApiError {
     Store(StoreError),
     Checkout(CheckoutError),
     Pricing(PricingError),
+    /// A cart line references a product id that is not in the served catalog.
+    UnknownProduct(String),
 }
 
 impl From<StoreError> for ApiError {
@@ -311,6 +328,9 @@ impl IntoResponse for ApiError {
                 format!("illegal checkout transition: {e:?}"),
             ),
             ApiError::Pricing(e) => (StatusCode::BAD_REQUEST, format!("unpriced item: {e:?}")),
+            ApiError::UnknownProduct(id) => {
+                (StatusCode::BAD_REQUEST, format!("unknown product: {id}"))
+            }
         };
         (code, Json(json!({ "error": message }))).into_response()
     }
@@ -361,13 +381,13 @@ mod tests {
             &app,
             Method::POST,
             "/carts",
-            Some(json!({"currency": "USD", "items": [{"product_id": "p1", "quantity": 2}]})),
+            Some(json!({"currency": "USD", "items": [{"product_id": "p-latte", "quantity": 2}]})),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         let id = created["id"].as_str().unwrap().to_string();
         assert!(id.starts_with("cart-"));
-        assert_eq!(created["totals"]["subtotal"]["units"], 200);
+        assert_eq!(created["totals"]["subtotal"]["units"], 900); // p-latte x2 = 900 units
 
         // Read it back.
         let (status, got) = call(&app, Method::GET, &format!("/carts/{id}"), None).await;
@@ -380,11 +400,11 @@ mod tests {
             &app,
             Method::PUT,
             &format!("/carts/{id}"),
-            Some(json!({"items": [{"product_id": "p2", "quantity": 2}]})),
+            Some(json!({"items": [{"product_id": "p-espresso", "quantity": 2}]})),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(updated["totals"]["subtotal"]["units"], 700); // 2 * 350
+        assert_eq!(updated["totals"]["subtotal"]["units"], 600); // 2 * 300
 
         // Cancel (idempotent).
         let (status, cancelled) =
@@ -406,11 +426,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_product_in_cart_is_rejected_with_400_and_totals_never_null() {
+        let app = app();
+
+        // Unknown product ids are rejected up front with a clear JSON error.
+        let (status, body) = call(
+            &app,
+            Method::POST,
+            "/carts",
+            Some(json!({
+                "currency": "USD",
+                "items": [{"product_id": "ghost", "quantity": 1}]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().unwrap().contains("ghost"),
+            "error should name the unknown product"
+        );
+
+        // Known ids always carry non-null totals.
+        let (status, created) = call(
+            &app,
+            Method::POST,
+            "/carts",
+            Some(json!({"currency": "USD", "items": [{"product_id": "p-latte", "quantity": 2}]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["totals"]["subtotal"]["units"], 900);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Replacing items with an unknown id is also a 400, not a null-totals 200.
+        let (status, body) = call(
+            &app,
+            Method::PUT,
+            &format!("/carts/{id}"),
+            Some(json!({"items": [{"product_id": "ghost", "quantity": 1}]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("ghost"));
+    }
+
+    #[tokio::test]
     async fn checkout_complete_produces_order_with_correct_totals() {
         let st = AppState::new(seed_catalog());
         let app = crate::router(st.clone());
 
-        // Cart: p1 x 2 ($1.00 each) + p3 x 1 ($0.25) => subtotal 225.
+        // Cart: p-latte x 2 ($4.50 each) + p-coldbrew x 1 ($5.00) => subtotal 1400.
         let (_, cart) = call(
             &app,
             Method::POST,
@@ -418,8 +483,8 @@ mod tests {
             Some(json!({
                 "currency": "USD",
                 "items": [
-                    {"product_id": "p1", "quantity": 2},
-                    {"product_id": "p3", "quantity": 1}
+                    {"product_id": "p-latte", "quantity": 2},
+                    {"product_id": "p-coldbrew", "quantity": 1}
                 ]
             })),
         )
@@ -437,8 +502,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let cs_id = session["id"].as_str().unwrap().to_string();
         assert_eq!(session["status"], "Pending");
-        assert_eq!(session["totals"]["subtotal"]["units"], 225);
-        assert_eq!(session["totals"]["total"]["units"], 225);
+        assert_eq!(session["totals"]["subtotal"]["units"], 1400);
+        assert_eq!(session["totals"]["total"]["units"], 1400);
         // Session pinned the cart snapshot.
         assert_eq!(session["cart"]["items"].as_array().unwrap().len(), 2);
 
@@ -453,8 +518,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(order["status"], "Placed");
         assert_eq!(order["checkout_session_id"], cs_id);
-        assert_eq!(order["totals"]["subtotal"]["units"], 225);
-        assert_eq!(order["totals"]["total"]["units"], 225);
+        assert_eq!(order["totals"]["subtotal"]["units"], 1400);
+        assert_eq!(order["totals"]["total"]["units"], 1400);
 
         // Completing again is idempotent: same order, no second order created.
         let (status, order2) = call(
@@ -476,7 +541,7 @@ mod tests {
             &app,
             Method::POST,
             "/carts",
-            Some(json!({"currency": "USD", "items": [{"product_id": "p1", "quantity": 1}]})),
+            Some(json!({"currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}]})),
         )
         .await;
         let cart_id = cart["id"].as_str().unwrap().to_string();
@@ -519,7 +584,7 @@ mod tests {
             &app,
             Method::POST,
             "/carts",
-            Some(json!({"currency": "USD", "items": [{"product_id": "p1", "quantity": 1}]})),
+            Some(json!({"currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}]})),
         )
         .await;
         let cart_id = cart["id"].as_str().unwrap().to_string();

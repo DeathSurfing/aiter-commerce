@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod checkout;
+pub mod mcp;
 pub mod payments;
 pub mod seed;
 
@@ -53,6 +54,7 @@ async fn service_info() -> Json<Value> {
         "version": aiter_core::VERSION,
         "repo": "https://github.com/DeathSurfing/aiter-commerce",
         "agentic": true,
+        "status": "ok",
     }))
 }
 
