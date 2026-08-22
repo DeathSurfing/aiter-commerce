@@ -36,6 +36,7 @@ pub mod catalog;
 pub mod checkout;
 pub mod mcp;
 pub mod payments;
+pub mod reserve;
 pub mod seed;
 
 use axum::middleware;
@@ -86,6 +87,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/checkout_sessions/{id}/cancel",
             post(checkout::cancel_checkout).route_layer(require_signed()),
+        )
+        .route(
+            "/reserve_pay/consent",
+            post(reserve::create_consent).route_layer(require_signed()),
+        )
+        .route(
+            "/reserve_pay/debit",
+            post(reserve::debit).route_layer(require_signed()),
         )
         .with_state(state)
 }

@@ -56,6 +56,7 @@ use aiter_core::catalog::Product;
 use aiter_core::checkout::CheckoutSession;
 use aiter_core::order::Order;
 use aiter_core::receipt::{AppendOnlyLog, AuditEntry, Receipt};
+use aiter_core::reserve::Consent;
 use aiter_core::signing::AgentIdentity;
 use aiter_core::store::InMemoryStore;
 
@@ -85,6 +86,8 @@ pub struct AppState {
     pub(crate) agents: Arc<Mutex<HashMap<String, AgentRecord>>>,
     /// Append-only audit trail of issued receipts (#27).
     pub(crate) audit: Arc<Mutex<AppendOnlyLog<Receipt>>>,
+    /// UPI Reserve Pay consent ledger (#22): consent id -> one-time mandate.
+    pub(crate) consents: Arc<Mutex<InMemoryStore<String, Consent>>>,
 }
 
 /// A registered agent: the public identity used to verify its signed requests
@@ -113,6 +116,7 @@ impl AppState {
             next_id: Arc::new(AtomicU64::new(0)),
             agents: Arc::new(Mutex::new(HashMap::new())),
             audit: Arc::new(Mutex::new(AppendOnlyLog::new())),
+            consents: Arc::new(Mutex::new(InMemoryStore::new())),
         }
     }
 
