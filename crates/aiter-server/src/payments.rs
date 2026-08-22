@@ -1431,7 +1431,7 @@ mod tests {
                     "/carts",
                     Some(json!({
                         "currency": "USD",
-                        "items": [{"product_id": "p1", "quantity": 2}]
+                        "items": [{"product_id": "p-espresso", "quantity": 2}]
                     })),
                     &[],
                 )
@@ -1474,7 +1474,7 @@ mod tests {
                 assert_eq!(link["short_url"], "https://rzp.io/i/int-flow");
                 // The mock saw the correct amount/currency and our order note.
                 let sent = seen_body.lock().unwrap().clone();
-                assert_eq!(sent["amount"], 200, "2 x $1.00 in minor units");
+                assert_eq!(sent["amount"], 600, "2 x $3.00 (p-espresso) in minor units");
                 assert_eq!(sent["currency"], "USD");
                 assert_eq!(sent["notes"]["order_id"], order_id);
 
