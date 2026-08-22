@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 use aiter_core::amount::Currency;
 use aiter_core::cart::{Cart, LineItem};
@@ -300,6 +301,20 @@ pub(crate) async fn complete_checkout(
     sessions
         .update(id.clone(), session)
         .map_err(ApiError::Store)?;
+
+    // Observability (issue #33): count + span the completed checkout. Only
+    // the order-creating path reaches here — idempotent re-completions return
+    // early above, so the counter is never double-bumped.
+    st.metrics
+        .checkouts_completed
+        .fetch_add(1, Ordering::Relaxed);
+    let span = tracing::info_span!(
+        "checkout_complete",
+        session_id = %id,
+        order_id = %order.id,
+        total_units = order_total.units()
+    );
+    let _guard = span.enter();
 
     // Receipt + append-only audit entry (#27): who = verified agent, what =
     // order id, when = now, amount = order total. Issued exactly once per
