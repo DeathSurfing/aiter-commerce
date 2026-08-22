@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::Ordering;
 
 use aiter_core::amount::Currency;
 use aiter_core::order::OrderEvent;
@@ -538,6 +539,12 @@ pub(crate) async fn order_payment_link(
         .get(&id)
         .cloned()
         .ok_or(ApiError::NotFound)?;
+
+    // Observability (issue #33): span the payment-link mint (the Razorpay
+    // call below is the slow, external part of this handler).
+    let span = tracing::info_span!("payment_link_generation", order_id = %order.id);
+    let _guard = span.enter();
+
     if order.payment_reference.is_some() {
         return Err(ApiError::Conflict(
             "order is already paid; refusing to mint a new payment link".to_string(),
@@ -590,6 +597,14 @@ pub(crate) async fn razorpay_webhook(
         WebhookOutcome::AlreadyPaid { payment_id, .. } => (Some(payment_id), "already_paid"),
         WebhookOutcome::Ignored => (None, "ignored"),
     };
+
+    // Observability (issue #33): only deliveries whose HMAC verified and
+    // which were reconciled count here — signature/processing failures return
+    // errors above.
+    st.metrics.webhooks_verified.fetch_add(1, Ordering::Relaxed);
+    let span = tracing::info_span!("webhook_verify_reconcile", outcome = %status);
+    let _guard = span.enter();
+
     Ok(Json(json!({
         "received": true,
         "payment_id": payment_id,
