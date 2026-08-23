@@ -441,15 +441,10 @@ pub async fn get_product(State(state): State<AppState>, Path(id): Path<String>) 
 /// (honouring `X-Forwarded-Proto`/`X-Forwarded-Host` when present) so a fresh
 /// agent can call them without external context (#46).
 pub async fn agent_card(headers: HeaderMap) -> Json<Value> {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
-    let host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))
-        .unwrap_or("localhost:8080");
+    // ponytail: charset check stops header injection/cache poisoning junk;
+    // trusting the proxy chain itself is deployment's job.
+    let scheme = forwarded_scheme(&headers);
+    let host = forwarded_host(&headers);
     let base_url = format!("{scheme}://{host}");
 
     Json(json!({
@@ -481,6 +476,64 @@ pub async fn agent_card(headers: HeaderMap) -> Json<Value> {
             "health": format!("{base_url}/agentic/health"),
         },
     }))
+}
+
+/// Scheme for the advertised base URL: only literal `http`/`https` are
+/// accepted from `X-Forwarded-Proto` (case-insensitive), anything else
+/// falls back to `http`.
+fn forwarded_scheme(headers: &HeaderMap) -> &str {
+    match headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("https") => "https",
+        _ => "http",
+    }
+}
+
+/// Hostname charset for forwarded/host headers: `[A-Za-z0-9.-]` plus an
+/// optional `:<port>` of digits. Rejects spaces, control chars, commas and
+/// scheme-like junk (`javascript:`).
+fn valid_host(host: &str) -> bool {
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        // Bracketed IPv6 literal: hex digits and colons only.
+        return !inner.is_empty() && inner.chars().all(|c| c.is_ascii_hexdigit() || c == ':');
+    }
+    // Optional single `:<port>` of ASCII digits; anything after another colon
+    // (`javascript:` style junk) is rejected.
+    let (host, port) = match host.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (host, None),
+    };
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
+/// Public base-URL host: first entry of `X-Forwarded-Host`, else the `Host`
+/// header, else `localhost:8080`. Every candidate must pass [`valid_host`].
+fn forwarded_host(headers: &HeaderMap) -> &str {
+    headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|h| valid_host(h))
+        .or_else(|| {
+            headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .filter(|h| valid_host(h))
+        })
+        .unwrap_or("localhost:8080")
 }
 
 /// `GET /llms.txt` — deterministic, plain-text catalog export, llms.txt-shaped (#11, #45).

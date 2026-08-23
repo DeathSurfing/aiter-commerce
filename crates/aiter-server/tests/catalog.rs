@@ -32,14 +32,17 @@ async fn get(path: &str) -> (StatusCode, String) {
 
 /// Perform a GET with an explicit `Host` header (used by the agent-card test).
 async fn get_with_host(path: &str, host: &str) -> (StatusCode, String) {
+    get_with_headers(path, &[("host", host)]).await
+}
+
+/// Perform a GET with arbitrary extra headers.
+async fn get_with_headers(path: &str, headers: &[(&str, &str)]) -> (StatusCode, String) {
+    let mut builder = Request::builder().uri(path);
+    for (name, value) in headers {
+        builder = builder.header(*name, HeaderValue::from_str(value).unwrap());
+    }
     let response = app()
-        .oneshot(
-            Request::builder()
-                .uri(path)
-                .header("host", HeaderValue::from_str(host).unwrap())
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -238,6 +241,111 @@ async fn agent_card_resolves_absolute_endpoints_from_host() {
     let full = card["endpoints"]["catalog"].as_str().unwrap();
     assert!(full.ends_with("/catalog/products"));
     assert!(full.starts_with("http://api.example.com"));
+}
+
+// --- Issue #70: forwarded-header validation ----------------------------------
+
+#[tokio::test]
+async fn agent_card_honours_valid_forwarded_https_and_host() {
+    // Behind a trusted TLS-terminating proxy, https + real host must resolve.
+    let (_, body) = get_with_headers(
+        "/.well-known/agent-card.json",
+        &[
+            ("host", "internal:8080"),
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "api.example.com"),
+        ],
+    )
+    .await;
+    let card: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(card["service"], "https://api.example.com");
+    assert_eq!(
+        card["endpoints"]["catalog"],
+        "https://api.example.com/catalog/products"
+    );
+}
+
+#[tokio::test]
+async fn agent_card_rejects_junk_proto() {
+    // Only literal http/https are accepted from x-forwarded-proto (#70).
+    for proto in ["javascript", "HTTP/2", "gopher", ""] {
+        let (_, body) = get_with_headers(
+            "/.well-known/agent-card.json",
+            &[("x-forwarded-proto", proto)],
+        )
+        .await;
+        let card: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(card["service"], "http://localhost:8080");
+    }
+}
+
+#[tokio::test]
+async fn agent_card_accepts_uppercase_proto() {
+    let (_, body) = get_with_headers(
+        "/.well-known/agent-card.json",
+        &[
+            ("host", "internal:8080"),
+            ("x-forwarded-proto", "HTTPS"),
+            ("x-forwarded-host", "shop.example.com"),
+        ],
+    )
+    .await;
+    let card: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(card["service"], "https://shop.example.com");
+}
+
+#[tokio::test]
+async fn agent_card_uses_first_chained_forwarded_host() {
+    // Chained proxies append entries; only the first is used, the rest must
+    // not leak into the URL (#70).
+    let (_, body) = get_with_headers(
+        "/.well-known/agent-card.json",
+        &[
+            ("host", "internal:8080"),
+            (
+                "x-forwarded-host",
+                "edge1.example.com , \tinject\".evil.example, evil.example",
+            ),
+        ],
+    )
+    .await;
+    let card: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(card["service"], "http://edge1.example.com");
+    let catalog = card["endpoints"]["catalog"].as_str().unwrap();
+    assert!(!catalog.contains("evil.example"));
+}
+
+#[tokio::test]
+async fn agent_card_falls_back_on_invalid_host_chars() {
+    // Spaces, quotes, control chars and scheme-like junk are rejected; the
+    // Host header (or the default) wins instead (#70).
+    for bad in [
+        "ev il.example",
+        "evil.example/path",
+        "javascript:alert(1)",
+        "a\tb.example",
+        "",
+    ] {
+        let (_, body) = get_with_headers(
+            "/.well-known/agent-card.json",
+            &[("host", "good.example"), ("x-forwarded-host", bad)],
+        )
+        .await;
+        let card: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            card["service"], "http://good.example",
+            "junk {bad:?} should fall back to Host"
+        );
+    }
+
+    // Invalid Host too → built-in default.
+    let (_, body) = get_with_headers(
+        "/.well-known/agent-card.json",
+        &[("host", "not a host"), ("x-forwarded-host", "")],
+    )
+    .await;
+    let card: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(card["service"], "http://localhost:8080");
 }
 
 // --- Service info ---------------------------------------------------------------
