@@ -18,6 +18,7 @@ use aiter_core::store::StoreError;
 
 use crate::catalog::{AppState, ListParams};
 use crate::checkout;
+use crate::error::{ApiError, ReserveError};
 
 /// Server name advertised in the `initialize` handshake.
 const SERVER_NAME: &str = "aiter-commerce-mcp";
@@ -214,17 +215,17 @@ fn string_arg(arguments: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing argument: {key}"))
 }
 
-/// Render a checkout [`ApiError`] as a plain message for the MCP client.
-fn api_error(err: checkout::ApiError) -> String {
+/// Render an [`ApiError`] as a plain message for the MCP client.
+fn api_error(err: ApiError) -> String {
     match err {
-        checkout::ApiError::NotFound => "not found".to_string(),
-        checkout::ApiError::Conflict(message) => message,
-        checkout::ApiError::Store(StoreError::NotFound) => "not found".to_string(),
-        checkout::ApiError::Store(StoreError::AlreadyExists) => "already exists".to_string(),
-        checkout::ApiError::Checkout(e) => format!("illegal checkout transition: {e:?}"),
-        checkout::ApiError::Pricing(e) => format!("unpriced item: {e:?}"),
-        checkout::ApiError::UnknownProduct(id) => format!("unknown product: {id}"),
-        checkout::ApiError::CurrencyMismatch {
+        ApiError::NotFound => "not found".to_string(),
+        ApiError::Conflict(message) => message,
+        ApiError::Store(StoreError::NotFound) => "not found".to_string(),
+        ApiError::Store(StoreError::AlreadyExists) => "already exists".to_string(),
+        ApiError::Checkout(e) => format!("illegal checkout transition: {e:?}"),
+        ApiError::Pricing(e) => format!("unpriced item: {e:?}"),
+        ApiError::UnknownProduct(id) => format!("unknown product: {id}"),
+        ApiError::CurrencyMismatch {
             product_id,
             expected,
             got,
@@ -233,8 +234,20 @@ fn api_error(err: checkout::ApiError) -> String {
             got.code(),
             expected.code()
         ),
-        checkout::ApiError::Razorpay(e) => e.to_string(),
-        checkout::ApiError::SpendLimit(message) => message,
+        ApiError::Razorpay(e) => e.to_string(),
+        ApiError::SpendLimit(message) => message,
+        ApiError::ConsentNotFound => "consent not found".to_string(),
+        ApiError::Reserve(e) => match e {
+            ReserveError::NotActive => "consent is not active".to_string(),
+            ReserveError::LimitExceeded { .. } => "spend limit exceeded".to_string(),
+            ReserveError::DeviceMismatch => {
+                "device_mismatch: confirm re-auth via ?confirm=true".to_string()
+            }
+            ReserveError::CurrencyMismatch(currency) => {
+                format!("currency mismatch: consent limit is in {}", currency.code())
+            }
+            ReserveError::InvalidAmount(message) => message,
+        },
     }
 }
 

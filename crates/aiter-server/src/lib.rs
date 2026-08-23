@@ -67,6 +67,7 @@ pub mod catalog;
 pub mod checkout;
 pub mod cli;
 pub mod config;
+pub(crate) mod error;
 pub mod mcp;
 pub mod metrics;
 pub mod payments;

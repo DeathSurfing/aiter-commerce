@@ -29,8 +29,6 @@
 //! the debit path is wired to the real Reserve Pay mandate API.
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -38,10 +36,11 @@ use std::sync::atomic::Ordering;
 
 use aiter_core::amount::{Amount, Currency};
 use aiter_core::reserve::{Consent, ConsentStatus};
-use aiter_core::store::{Store, StoreError};
+use aiter_core::store::Store;
 use aiter_core::util::now;
 
 use crate::catalog::AppState;
+use crate::error::{ApiError, ReserveError};
 
 /// Store default currency for consents: matches the seeded catalog (USD).
 const DEFAULT_CURRENCY: Currency = Currency::USD;
@@ -145,20 +144,22 @@ pub(crate) async fn debit(
     let consent = consents
         .get(&body.consent_id)
         .cloned()
-        .ok_or(ApiError::NotFound)?;
+        .ok_or(ApiError::ConsentNotFound)?;
 
     if consent.status != ConsentStatus::Active {
-        return Err(ApiError::NotActive);
+        return Err(ApiError::Reserve(ReserveError::NotActive));
     }
     if consent.spend_limit.currency() != body.currency {
-        return Err(ApiError::CurrencyMismatch(consent.spend_limit.currency()));
+        return Err(ApiError::Reserve(ReserveError::CurrencyMismatch(
+            consent.spend_limit.currency(),
+        )));
     }
     let remaining = consent.remaining();
     if body.amount_minor > remaining {
-        return Err(ApiError::LimitExceeded { remaining });
+        return Err(ApiError::Reserve(ReserveError::LimitExceeded { remaining }));
     }
     if body.device != consent.device && !query.confirm {
-        return Err(ApiError::DeviceMismatch);
+        return Err(ApiError::Reserve(ReserveError::DeviceMismatch));
     }
 
     let mut updated = consent.clone();
@@ -168,7 +169,9 @@ pub(crate) async fn debit(
     );
     consents
         .update(body.consent_id.clone(), updated)
-        .map_err(ApiError::Store)?;
+        // The former reserve-local enum rendered a store miss as "consent not
+        // found"; keep that exact body instead of the generic 404 (#73).
+        .map_err(|_| ApiError::ConsentNotFound)?;
 
     // Observability (issue #33): count the successful debit.
     st.metrics.reserve_debits.fetch_add(1, Ordering::Relaxed);
@@ -183,83 +186,25 @@ pub(crate) async fn debit(
 // ---------------------------------------------------------------------------
 // Error handling
 // ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub(crate) enum ApiError {
-    NotFound,
-    Store(StoreError),
-    /// Consent exists but is not `Active` (revoked).
-    NotActive,
-    /// Debit would exceed the consent's remaining limit.
-    LimitExceeded {
-        remaining: i64,
-    },
-    /// Debit device differs from the consenting device.
-    DeviceMismatch,
-    /// Debit currency differs from the consent's limit currency.
-    CurrencyMismatch(Currency),
-    /// A minor-unit amount was not a positive integer (negative debits would
-    /// inflate the remaining limit; non-positive spend limits are meaningless).
-    InvalidAmount(String),
-}
+//
+// Errors render through the crate-shared `crate::error::{ApiError, ReserveError}`
+// (issue #73): same statuses and JSON bodies as the local enum this module
+// used to own.
 
 /// Reject non-positive minor-unit amounts before any ledger math (#36).
 ///
 /// A negative `amount_minor` would pass the `> remaining` guard and then
 /// *decrease* `total_spent`, inflating the consent's remaining limit — the
 /// agent could mint spend headroom out of thin air. A non-positive spend
-/// limit is equally meaningless. Both cart mutators' sibling checks use this
-/// one guard so every money-taking route rejects `<= 0` the same way.
+/// limit is equally meaningless.
 fn validate_positive_minor(units: i64, field: &str) -> Result<(), ApiError> {
     if units <= 0 {
-        return Err(ApiError::InvalidAmount(format!(
+        return Err(ReserveError::InvalidAmount(format!(
             "{field} must be a positive integer number of minor units, got {units}"
-        )));
+        ))
+        .into());
     }
     Ok(())
-}
-
-impl From<StoreError> for ApiError {
-    fn from(e: StoreError) -> Self {
-        ApiError::Store(e)
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (code, body): (StatusCode, Value) = match self {
-            ApiError::NotFound => (StatusCode::NOT_FOUND, json!({"error": "consent not found"})),
-            ApiError::Store(StoreError::NotFound) => {
-                (StatusCode::NOT_FOUND, json!({"error": "consent not found"}))
-            }
-            ApiError::Store(StoreError::AlreadyExists) => {
-                (StatusCode::CONFLICT, json!({"error": "already exists"}))
-            }
-            ApiError::NotActive => (
-                StatusCode::FORBIDDEN,
-                json!({"error": "consent is not active"}),
-            ),
-            ApiError::LimitExceeded { remaining } => (
-                StatusCode::FORBIDDEN,
-                json!({"error": "spend limit exceeded", "remaining": remaining}),
-            ),
-            ApiError::DeviceMismatch => (
-                StatusCode::CONFLICT,
-                json!({
-                    "error": "device_mismatch",
-                    "detail": "confirm re-auth via ?confirm=true",
-                }),
-            ),
-            ApiError::CurrencyMismatch(currency) => (
-                StatusCode::FORBIDDEN,
-                json!({"error": "currency mismatch", "limit_currency": currency.code()}),
-            ),
-            ApiError::InvalidAmount(message) => {
-                (StatusCode::BAD_REQUEST, json!({ "error": message }))
-            }
-        };
-        (code, Json(body)).into_response()
-    }
 }
 
 #[cfg(test)]
@@ -267,7 +212,7 @@ mod tests {
     use super::*;
     use crate::catalog::seed_catalog;
     use crate::test_util::{call, register_test_agent};
-    use axum::http::Method;
+    use axum::http::{Method, StatusCode};
     use axum::Router;
     use serde_json::Value;
 

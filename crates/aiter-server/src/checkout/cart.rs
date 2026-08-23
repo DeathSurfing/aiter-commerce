@@ -10,7 +10,7 @@ use aiter_core::pricing::{compute_totals, NoTax, Totals};
 use aiter_core::store::Store;
 
 use crate::catalog::AppState;
-use crate::checkout::error::ApiError;
+use crate::error::ApiError;
 
 // ---------------------------------------------------------------------------
 // Cart API
