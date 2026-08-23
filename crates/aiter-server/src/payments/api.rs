@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use aiter_core::store::Store;
 
 use crate::catalog::AppState;
-use crate::checkout::ApiError;
+use crate::error::ApiError;
 
 use super::client::{RazorpayClient, RazorpayError};
 use super::webhook::{process_payment_webhook, WebhookError, WebhookOutcome};

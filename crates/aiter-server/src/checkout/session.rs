@@ -14,7 +14,7 @@ use aiter_core::util::now;
 
 use crate::auth::VerifiedAgent;
 use crate::catalog::AppState;
-use crate::checkout::error::ApiError;
+use crate::error::ApiError;
 
 // ---------------------------------------------------------------------------
 // Checkout session API

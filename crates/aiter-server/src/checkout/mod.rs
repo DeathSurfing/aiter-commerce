@@ -16,11 +16,9 @@
 //! served catalog (`AppState::price_of`), never a separate price book.
 
 pub(crate) mod cart;
-pub(crate) mod error;
 pub(crate) mod session;
 
 pub(crate) use cart::{cancel_cart, create_cart, get_cart, update_cart, CreateCartRequest};
-pub(crate) use error::ApiError;
 pub(crate) use session::{cancel_checkout, complete_checkout, create_checkout_session};
 
 pub(crate) use session::CreateSessionRequest;
