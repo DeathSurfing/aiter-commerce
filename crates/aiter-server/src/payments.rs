@@ -424,6 +424,8 @@ pub(crate) enum WebhookError {
     OrderNotFound(String),
     /// The order exists but cannot transition (e.g. already cancelled).
     OrderState(String),
+    /// The delivered payment does not match the order total exactly (#69).
+    AmountMismatch { expected: i64, got: i64 },
     /// Storage failure while persisting the transition.
     Store(StoreError),
 }
@@ -460,10 +462,11 @@ pub(crate) async fn process_payment_webhook(
         .notes
         .get("order_id")
         .ok_or(WebhookError::NoOrderReference)?;
-    reconcile_payment(st, order_id, &entity.id).await
+    reconcile_payment(st, order_id, &entity.id, &entity).await
 }
 
-/// Drive the order to its paid state and record the transaction id (#21).
+/// Drive the order to its paid state and record the transaction id (#21),
+/// binding the delivered payment to the order's exact total (#69).
 ///
 /// Idempotent: an order that already carries a `payment_reference` is returned
 /// as `AlreadyPaid` without touching state again.
@@ -471,6 +474,7 @@ async fn reconcile_payment(
     st: &AppState,
     order_id: &str,
     payment_id: &str,
+    payment: &WebhookPaymentEntity,
 ) -> Result<WebhookOutcome, WebhookError> {
     let mut orders = st.orders.lock().await;
     let mut order = orders
@@ -485,6 +489,17 @@ async fn reconcile_payment(
         });
     }
 
+    // ponytail: exact-match binding; partial-capture flows need a real
+    // order-payment ledger.
+    if payment.amount != order.totals.total.units()
+        || !currency_matches(payment.currency.as_deref(), order.totals.total.currency)
+    {
+        return Err(WebhookError::AmountMismatch {
+            expected: order.totals.total.units(),
+            got: payment.amount,
+        });
+    }
+
     order
         .apply_event(OrderEvent::Confirm, now())
         .map_err(|err| WebhookError::OrderState(format!("{err:?}")))?;
@@ -496,6 +511,13 @@ async fn reconcile_payment(
         order_id: order_id.to_string(),
         payment_id: payment_id.to_string(),
     })
+}
+
+/// Case-insensitive ISO-code comparison against the order currency. A missing
+/// webhook currency (`#[serde(default)]`) is accepted: Razorpay always sends
+/// it on real deliveries and the amount comparison alone still binds those.
+fn currency_matches(reported: Option<&str>, expected: Currency) -> bool {
+    reported.is_none_or(|code| code.eq_ignore_ascii_case(expected.code()))
 }
 
 /// Razorpay webhook envelope — only the fields we act on are modelled.
@@ -519,6 +541,11 @@ struct WebhookPayment {
 struct WebhookPaymentEntity {
     /// The payment id (`pay_…`) recorded as the order's transaction reference.
     id: String,
+    /// Amount actually paid, in minor units — bound against the order total (#69).
+    amount: i64,
+    /// ISO 4217 currency code of the payment (absent on some payloads).
+    #[serde(default)]
+    currency: Option<String>,
     /// Custom fields copied from the payment link/order; `order_id` is ours.
     #[serde(default)]
     notes: HashMap<String, String>,
@@ -655,6 +682,13 @@ fn webhook_error_response(err: WebhookError) -> (StatusCode, Json<Value>) {
             (StatusCode::BAD_REQUEST, format!("unknown order: {id}"))
         }
         WebhookError::OrderState(msg) => (StatusCode::CONFLICT, msg),
+        WebhookError::AmountMismatch { expected, got } => (
+            StatusCode::CONFLICT,
+            format!(
+                "payment does not match the order total (amount + currency): \
+                 expected {expected}, got {got}"
+            ),
+        ),
         WebhookError::Store(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("store error: {e:?}"),
@@ -1311,7 +1345,7 @@ mod tests {
     async fn non_paid_event_is_ignored() {
         let st = AppState::new(seed_catalog());
         seed_order(&st, "ord-cs-0").await;
-        let body: &[u8] = br#"{"event":"payment.failed","payload":{"payment":{"entity":{"id":"pay_x","notes":{"order_id":"ord-cs-0"}}}}}"#;
+        let body: &[u8] = br#"{"event":"payment.failed","payload":{"payment":{"entity":{"id":"pay_x","notes":{"order_id":"ord-cs-0"},"amount":499,"currency":"USD"}}}}"#;
         let client = webhook_test_client();
         let signature = fixture_signature("whsec_test_secret", body);
 
@@ -1334,7 +1368,7 @@ mod tests {
     async fn payment_paid_without_order_note_reference_is_an_error() {
         let st = AppState::new(seed_catalog());
         let body: &[u8] =
-            br#"{"event":"payment.paid","payload":{"payment":{"entity":{"id":"pay_orphan"}}}}"#;
+            br#"{"event":"payment.paid","payload":{"payment":{"entity":{"id":"pay_orphan","amount":100,"currency":"USD"}}}}"#;
         let client = webhook_test_client();
         let signature = fixture_signature("whsec_test_secret", body);
 
@@ -1342,6 +1376,164 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WebhookError::NoOrderReference));
+    }
+
+    // --- (f2) amount/currency binding (#69) --------------------------------
+
+    /// A `payment.paid` body with an explicit amount/currency addressed to
+    /// `ord-cs-0` (seeded at 499 USD by [`seed_order`]).
+    fn paid_body(amount: i64, currency: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "event": "payment.paid",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_bound",
+                        "notes": { "order_id": "ord-cs-0" },
+                        "amount": amount,
+                        "currency": currency
+                    }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    async fn process_paid(st: &AppState, body: &[u8]) -> Result<WebhookOutcome, WebhookError> {
+        let client = webhook_test_client();
+        let signature = fixture_signature("whsec_test_secret", body);
+        process_payment_webhook(st, &client, body, &signature).await
+    }
+
+    async fn seeded_order_state(st: &AppState) -> (OrderStatus, Option<String>) {
+        let order = st
+            .orders
+            .lock()
+            .await
+            .get(&"ord-cs-0".to_string())
+            .cloned()
+            .unwrap();
+        (order.status, order.payment_reference)
+    }
+
+    #[tokio::test]
+    async fn underpaid_payment_webhook_conflicts_and_leaves_order_payable() {
+        let st = AppState::new(seed_catalog());
+        seed_order(&st, "ord-cs-0").await;
+        let body = paid_body(498, "USD");
+
+        let err = process_paid(&st, &body).await.unwrap_err();
+        assert!(matches!(
+            err,
+            WebhookError::AmountMismatch {
+                expected: 499,
+                got: 498
+            }
+        ));
+
+        let (status, reference) = seeded_order_state(&st).await;
+        assert_eq!(status, OrderStatus::Placed, "underpay must not transition");
+        assert_eq!(reference, None);
+
+        // The order stays payable by the correct webhook afterwards.
+        let outcome = process_paid(&st, WEBHOOK_BODY).await.unwrap();
+        assert!(matches!(outcome, WebhookOutcome::Paid { .. }));
+    }
+
+    #[tokio::test]
+    async fn overpaid_payment_webhook_conflicts_exact_match_only() {
+        let st = AppState::new(seed_catalog());
+        seed_order(&st, "ord-cs-0").await;
+        let body = paid_body(500, "USD");
+
+        let err = process_paid(&st, &body).await.unwrap_err();
+        assert!(matches!(
+            err,
+            WebhookError::AmountMismatch {
+                expected: 499,
+                got: 500
+            }
+        ));
+
+        let (status, reference) = seeded_order_state(&st).await;
+        assert_eq!(status, OrderStatus::Placed, "overpay must not transition");
+        assert_eq!(reference, None);
+    }
+
+    #[tokio::test]
+    async fn wrong_currency_payment_webhook_conflicts() {
+        let st = AppState::new(seed_catalog());
+        seed_order(&st, "ord-cs-0").await;
+        let body = paid_body(499, "INR"); // right amount, wrong currency
+
+        let err = process_paid(&st, &body).await.unwrap_err();
+        assert!(matches!(
+            err,
+            WebhookError::AmountMismatch {
+                expected: 499,
+                got: 499
+            }
+        ));
+
+        let (status, reference) = seeded_order_state(&st).await;
+        assert_eq!(
+            status,
+            OrderStatus::Placed,
+            "currency mismatch must not transition"
+        );
+        assert_eq!(reference, None);
+    }
+
+    #[tokio::test]
+    async fn exact_amount_with_case_insensitive_currency_reconciles() {
+        let st = AppState::new(seed_catalog());
+        seed_order(&st, "ord-cs-0").await;
+        let body = paid_body(499, "usd"); // ISO codes compare case-insensitively
+
+        let outcome = process_paid(&st, &body).await.unwrap();
+        assert!(matches!(
+            outcome,
+            WebhookOutcome::Paid { ref order_id, ref payment_id }
+                if order_id == "ord-cs-0" && payment_id == "pay_bound"
+        ));
+        let (status, reference) = seeded_order_state(&st).await;
+        assert_eq!(status, OrderStatus::Confirmed);
+        assert_eq!(reference.as_deref(), Some("pay_bound"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_delivery_returns_already_paid_before_any_comparison() {
+        let st = AppState::new(seed_catalog());
+        seed_order(&st, "ord-cs-0").await;
+
+        // First delivery reconciles; the second one would fail the binding if
+        // it were compared — idempotency must win first.
+        let first = process_paid(&st, WEBHOOK_BODY).await.unwrap();
+        assert!(matches!(first, WebhookOutcome::Paid { .. }));
+        let outcome = process_paid(&st, &paid_body(100, "EUR")).await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            WebhookOutcome::AlreadyPaid { ref payment_id, .. } if payment_id == "pay_fixture"
+        ));
+        let (status, reference) = seeded_order_state(&st).await;
+        assert_eq!(status, OrderStatus::Confirmed);
+        assert_eq!(reference.as_deref(), Some("pay_fixture"));
+    }
+
+    #[test]
+    fn amount_mismatch_maps_to_409_with_error_json_shape() {
+        let (code, body) = webhook_error_response(WebhookError::AmountMismatch {
+            expected: 499,
+            got: 498,
+        });
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(
+            body.0["error"],
+            json!(
+                "payment does not match the order total (amount + currency): expected 499, got 498"
+            )
+        );
     }
 
     // --- (g) HTTP surface: payment link + webhook routes -------------------
@@ -1474,10 +1666,25 @@ mod tests {
                 assert_eq!(sent["currency"], "USD");
                 assert_eq!(sent["notes"]["order_id"], order_id);
 
-                // 3. payment.paid webhook with a fixture signature.
-                let body = format!(
-                    r#"{{"event":"payment.paid","payload":{{"payment":{{"entity":{{"id":"pay_int_1","notes":{{"order_id":"{order_id}"}}}}}}}}}}"#
-                );
+                // 3. payment.paid webhook with a fixture signature; carries the
+                // exact order total (600 minor units) + currency (#69 binding).
+                // Serialize once and sign those exact bytes: `call_unsigned`
+                // re-serializes the value (sorted keys), so the signature must
+                // cover the canonical form.
+                let body = json!({
+                    "event": "payment.paid",
+                    "payload": {
+                        "payment": {
+                            "entity": {
+                                "id": "pay_int_1",
+                                "notes": { "order_id": order_id },
+                                "amount": 600,
+                                "currency": "USD"
+                            }
+                        }
+                    }
+                })
+                .to_string();
                 let signature = fixture_signature("whsec_test_secret", body.as_bytes());
                 let (status, receipt) = test_util::call_unsigned(
                     &app,
@@ -1507,7 +1714,11 @@ mod tests {
                 assert_eq!(status, StatusCode::OK);
                 let order = st.orders.lock().await.get(&order_id).cloned().unwrap();
                 assert_eq!(order.status, OrderStatus::Confirmed);
-                assert_eq!(order.timeline.len(), 2, "duplicate webhook: no double transition");
+                assert_eq!(
+                    order.timeline.len(),
+                    2,
+                    "duplicate webhook: no double transition"
+                );
 
                 // 5. A bogus signature is rejected with 401.
                 let (status, _) = test_util::call_unsigned(
