@@ -12,13 +12,18 @@
 //!    signature over method, target URI, body digest and agent id using
 //!    [`aiter_core::signing::verify_request`] — failures get `401`,
 //! 4. on success tags the request with [`VerifiedAgent`] so downstream
-//!    handlers know which agent they are acting for, and restores the body so
-//!    the handler's `Json` extractor still sees it.
+//!    handler's `Json` extractor still sees it,
+//! 5. enforces signature freshness against this server's own clock — a valid
+//!    signature older than [`MAX_SIGNATURE_AGE_SECS`] (or stamped further than
+//!    that window into the future) gets `401`, so captured requests cannot be
+//!    replayed after the window closes.
 //!
 //! Requests are tiny JSON documents, so buffering the whole body to recompute
 //! the content digest is fine (ponytail: 64 KiB ceiling, oversized bodies are
-//! rejected). Timestamp freshness is the merchant's job (see the signing
-//! module docs); verification here covers integrity and identity only.
+//! rejected). Verification here covers integrity, identity and freshness; the
+//! signing module only verifies the fields themselves.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
@@ -40,6 +45,21 @@ pub const SIGNATURE_HEADER: &str = "x-request-signature";
 /// Ceiling for buffered request bodies (checkout payloads are tiny JSON).
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// How far from this server's clock a signature's `@created` timestamp may
+/// sit and still verify: 5 minutes in either direction (past or future).
+/// Replay window for captured requests; one comparison covers both staleness
+/// and clock skew.
+// ponytail: fixed 5-minute window, env knob if clock skew demands.
+pub(crate) const MAX_SIGNATURE_AGE_SECS: u64 = 300;
+
+/// Current unix seconds (mirrors `rate_limit::now_secs`).
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Extension inserted by [`require_signed`] so downstream handlers know which
 /// verified agent issued the request.
 #[derive(Debug, Clone)]
@@ -56,6 +76,14 @@ pub async fn require_signed(
         Ok(pair) => pair,
         Err(message) => return unauthorized(&message),
     };
+
+    // Replay guard (issue #67): the signature cryptographically covers its
+    // own `@created` timestamp, so a captured request verifies forever unless
+    // something compares it to a clock. One symmetric comparison bounds both
+    // staleness and future skew.
+    if signature.timestamp.abs_diff(now_secs()) > MAX_SIGNATURE_AGE_SECS {
+        return unauthorized("signature timestamp outside acceptable window");
+    }
 
     // Only registered agents may mutate state: resolve the public key.
     let identity = {
@@ -125,4 +153,82 @@ fn unauthorized(message: &str) -> Response {
 
 fn forbidden(message: &str) -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Method;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    use crate::test_util::{demo_agent, register_test_agent};
+
+    async fn app() -> Router {
+        let st = AppState::default();
+        register_test_agent(&st).await;
+        crate::router(st)
+    }
+
+    /// Drive POST /carts signed by the shared test agent (the identity
+    /// [`app`] registers) with an explicit signature timestamp — everything
+    /// else about the request is valid.
+    async fn post_signed_at(app: &Router, timestamp: u64) -> (StatusCode, serde_json::Value) {
+        let (keypair, identity) = demo_agent();
+        let uri = "/carts";
+        let body_str =
+            json!({"currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}]})
+                .to_string();
+        let signature = keypair.sign_request(
+            &identity.id,
+            Method::POST.as_str(),
+            uri,
+            body_str.as_bytes(),
+            timestamp,
+        );
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header(AGENT_ID_HEADER, &identity.id)
+            .header(SIGNATURE_HEADER, serde_json::to_string(&signature).unwrap())
+            .body(Body::from(body_str))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn fresh_timestamp_passes() {
+        let app = app().await;
+        let (status, body) = post_signed_at(&app, now_secs()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn stale_signature_is_rejected() {
+        let app = app().await;
+        let (status, body) = post_signed_at(&app, now_secs() - MAX_SIGNATURE_AGE_SECS - 1).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(
+            body["error"],
+            "signature timestamp outside acceptable window"
+        );
+    }
+
+    #[tokio::test]
+    async fn far_future_signature_is_rejected_by_the_same_comparison() {
+        let app = app().await;
+        let (status, body) = post_signed_at(&app, now_secs() + MAX_SIGNATURE_AGE_SECS * 10).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(
+            body["error"],
+            "signature timestamp outside acceptable window"
+        );
+    }
 }

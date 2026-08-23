@@ -9,8 +9,11 @@
 //! the method, target URI, body digest, timestamp **and** agent id are all
 //! covered by the signature, a valid signature is cryptographic proof of
 //! intent: nothing about the request can be changed after signing without the
-//! signature breaking (freshness is the merchant's job — compare `timestamp`
-//! against its own clock, as in UCP/AP2).
+//! signature breaking. Integrity alone does not stop replays, though: a valid
+//! signature could be re-presented forever unless its `@created` timestamp is
+//! compared against a clock. This module verifies fields only — freshness is
+//! enforced by the merchant *server* itself (`aiter-server`'s `require_signed`
+//! middleware rejects timestamps outside a fixed window around its clock).
 //!
 //! # Signature envelope (RFC 9421 simplified)
 //!
