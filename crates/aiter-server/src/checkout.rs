@@ -151,6 +151,10 @@ pub(crate) async fn update_cart(
 ) -> Result<Json<CartResponse>, ApiError> {
     let mut stores = st.carts.lock().await;
     let cart = stores.get(&id).cloned().ok_or(ApiError::NotFound)?;
+    // A cancelled cart is frozen (#68): its items can no longer be rewritten.
+    if st.cancelled_carts.lock().await.contains(&id) {
+        return Err(ApiError::Conflict("cart is cancelled".to_string()));
+    }
     // Reject unknown product ids / cross-currency lines up front (400),
     // never a null-totals cart.
     validate_catalog_items(&st, cart.currency, &body.items)?;
@@ -205,6 +209,11 @@ pub(crate) async fn create_checkout_session(
         .get(&body.cart_id)
         .cloned()
         .ok_or(ApiError::NotFound)?;
+    // A cancelled cart is frozen (#68): it must never be snapshotted into a
+    // session, which would otherwise complete into a paid order.
+    if st.cancelled_carts.lock().await.contains(&body.cart_id) {
+        return Err(ApiError::Conflict("cart is cancelled".to_string()));
+    }
     let totals = compute_totals(&cart, |p| st.price_of(p), &NoTax).map_err(ApiError::Pricing)?;
     let id = st.gen_id("cs");
     let session = CheckoutSession::new(
@@ -713,6 +722,69 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_for_a_cancelled_cart_is_rejected() {
+        let app = app().await;
+        let (_, cart) = call(
+            &app,
+            Method::POST,
+            "/carts",
+            Some(json!({"currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}]})),
+        )
+        .await;
+        let cart_id = cart["id"].as_str().unwrap().to_string();
+
+        call(
+            &app,
+            Method::POST,
+            &format!("/carts/{cart_id}/cancel"),
+            None,
+        )
+        .await;
+
+        // The repro from #68 fails here: snapshotting a cancelled cart is 409.
+        let (status, body) = call(
+            &app,
+            Method::POST,
+            "/checkout_sessions",
+            Some(json!({"cart_id": cart_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "cart is cancelled");
+    }
+
+    #[tokio::test]
+    async fn updating_a_cancelled_cart_is_rejected() {
+        let app = app().await;
+        let (_, cart) = call(
+            &app,
+            Method::POST,
+            "/carts",
+            Some(json!({"currency": "USD", "items": [{"product_id": "p-latte", "quantity": 1}]})),
+        )
+        .await;
+        let cart_id = cart["id"].as_str().unwrap().to_string();
+
+        call(
+            &app,
+            Method::POST,
+            &format!("/carts/{cart_id}/cancel"),
+            None,
+        )
+        .await;
+
+        let (status, body) = call(
+            &app,
+            Method::PUT,
+            &format!("/carts/{cart_id}"),
+            Some(json!({"items": [{"product_id": "p-espresso", "quantity": 2}]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "cart is cancelled");
     }
 
     #[test]
