@@ -1,0 +1,22 @@
+# AITER COMMERCE — docker compose deployment for the aiter-server image.
+#
+# Usage:
+#   cp .env.example .env        # fill in RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET /
+#                               #   RAZORPAY_WEBHOOK_SECRET (the rest has defaults)
+#   docker compose up           # builds aiter-commerce from . if the image is missing
+#
+# All runtime config is read from .env (env_file) — PORT, RUST_LOG, AITER_CONFIG,
+# RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_MODE, RAZORPAY_WEBHOOK_SECRET.
+# The container listens on $PORT; the host port is mapped 1:1 to the same value.
+#
+# No healthcheck: the image is distroless (no shell, no curl), so exec probes are
+# impossible. Probe liveness externally:
+#   curl -sf "localhost:${PORT:-8080}/agentic/health"   # or GET / on the same port
+services:
+  app:
+    image: aiter-commerce
+    build: .
+    env_file: .env
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    restart: unless-stopped
