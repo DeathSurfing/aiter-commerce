@@ -1,0 +1,20 @@
+# Build artifacts
+/target
+
+# Git / VCS
+/.git
+
+# Secrets / local config (never bake into the image)
+aiter.env
+.env
+.env.*
+
+# Editor / OS scratch
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
