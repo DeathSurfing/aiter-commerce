@@ -77,6 +77,7 @@ RAZORPAY_BASE_URL=http://127.0.0.1:9091 cargo run -p aiter-server
 | `RAZORPAY_BASE_URL` | API base override (mock/gateway only) | `https://api.razorpay.com` |
 | `RAZORPAY_WEBHOOK_SECRET` | HMAC-SHA256 webhook verification secret | — (webhooks fail closed without it) |
 | `PORT` | HTTP listen port | `8080` |
+| `RUST_LOG` | tracing filter, e.g. `aiter_server=debug,tower_http=info` | `aiter_server=info,tower_http=info` |
 
 - Keys are read **lazily, per request** — the server boots fine without them and errors (`503`) only when a link is minted or a webhook arrives.
 - Credentials are **never logged**.
@@ -140,7 +141,7 @@ Behavioral guarantees:
 ./scripts/check.sh   # cargo fmt --check, clippy -D warnings, test, build --release
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same four gates on every push and pull request.
+CI (`.github/workflows/ci.yml`) runs the same four gates on every push and pull request. Two more workflows build on it: `docker.yml` is the Docker PR gate (builds the image and runs a compose smoke test on PRs), and `release.yml` builds and pushes multi-arch images to `ghcr.io/deathsurfing/aiter-commerce` on `v*` tags.
 
 ## Deploy with Docker
 
@@ -172,6 +173,75 @@ aiter.example.com {
 Keep the container's port private to the proxy; expose only the proxy to the internet. Traefik works the same way (its `forwardedHeaders` come from the trusted set).
 
 **State is in-process today (demo-grade).** Carts, sessions, orders, and consents live in in-memory stores inside the server process, so a container restart loses them. When durable persistence lands (the `sled`-backed store in `aiter-core` is the plan), mount a volume for the store directory rather than redesigning the image.
+
+## Deploy your own store
+
+The binary ships with a small demo catalog baked into it (`crates/aiter-server/fixtures/catalog.json`). To serve **your** store you replace that fixture with your catalog and rebuild the image. The catalog is compiled in at build time (there is no runtime product-upload endpoint yet), so this is a build-time change.
+
+### 1. Replace the catalog
+
+Write your products into `crates/aiter-server/fixtures/catalog.json`. Each product has this shape; `price.units` is minor units (paise for INR, cents for USD), so ₹3,499 is `349900`:
+
+```json
+{
+  "products": [
+    {
+      "id": "indigo-overshirt",
+      "title": "Indigo Overshirt",
+      "price": { "units": 349900, "currency": "INR" },
+      "description": "Heavyweight cotton overshirt, garment dyed.",
+      "tags": ["clothing", "winter"],
+      "available_qty": 25
+    }
+  ]
+}
+```
+
+- `id` must be unique: agents reference products by it (carts, sessions, orders).
+- Keep **one `currency`** across all products. A cart that mixes currencies is rejected (`400`); the catalog feed, `llms.txt` and the discovery card all read from this file.
+
+### 2. Add your payment keys
+
+Copy `.env.example` to `.env` and set the Razorpay keys (see [Payments](#payments-razorpay)):
+
+```bash
+cp .env.example .env
+# set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_MODE (sandbox|live),
+# and RAZORPAY_WEBHOOK_SECRET (verifies payment.paid webhooks)
+```
+
+Register a webhook in the Razorpay dashboard pointing at your public `POST /webhooks/razorpay` (via your Caddy/Traefik proxy, see [Deploy with Docker](#deploy-with-docker)); the server verifies its HMAC and moves the referenced order to paid.
+
+### 3. Build and run with your catalog
+
+Because the catalog is compiled in, rebuild the image from your checkout:
+
+```bash
+docker build -t my-store .                     # compiles aiter-server with your fixture
+docker run --rm -p 8080:8080 --env-file .env my-store
+```
+
+or use compose (it builds from `.` when the image is missing):
+
+```bash
+docker compose up -d
+```
+
+Run the signed demo buy against it (the demo agent is pre-registered in every build):
+
+```bash
+cargo run --bin aiter-cli -- --base http://localhost:8080
+```
+
+### 4. Register your own agents (not the demo one)
+
+`agent-demo` is pre-registered with a fixed, public Ed25519 seed, so it is for demos and tests only. A live store should sign with its own agents. Clean agent registration (an admin surface that takes an Ed25519 public key plus a spend cap) is not wired yet; agents are currently registered in code on `AppState` (`crates/aiter-server/src/catalog.rs`). Until that lands, add your agents in code and set spend caps there.
+
+### 5. What is still demo-grade
+
+- **Catalog** is embedded at build time: change products by editing the fixture and rebuilding, not through a runtime API.
+- **State is in-process** (see [Deploy with Docker](#deploy-with-docker)): carts, sessions, orders and consents live in memory, so a restart loses them. When the `sled`-backed store lands, mount a volume for the store directory.
+- **Healthcheck is external**: the distroless image has no shell.
 
 ## License
 
