@@ -142,6 +142,37 @@ Behavioral guarantees:
 
 CI (`.github/workflows/ci.yml`) runs the same four gates on every push and pull request.
 
+## Deploy with Docker
+
+The server ships as a multi-stage, distroless image (`aiter-server` binary only, `gcr.io/distroless/cc-debian12`, non-root). A published image is built on tag push and served from **`ghcr.io/deathsurfing/aiter-commerce`** (see `release.yml`); `compose.yml` runs it by the local name `aiter-commerce` with a `build: .` fallback.
+
+```bash
+docker pull ghcr.io/deathsurfing/aiter-commerce:latest   # fetch the image
+docker compose up -d                                     # start the server (builds from . if the image is missing)
+cargo run --bin aiter-cli -- --base http://localhost:8080  # signed demo buy against the container
+```
+
+`compose.yml` maps the container's port 1:1 to the same `$PORT` (default `8080`) and reads all runtime config from `.env` (`env_file`) — copy `.env.example` to `.env` and fill in the Razorpay keys, exactly as in [Payments](#payments-razorpay). The demo buy mints a payment link, so it needs those keys (or a `RAZORPAY_BASE_URL` mock, see Quickstart). If you pulled the registry image instead of building, tag it `aiter-commerce` once so compose picks it up.
+
+`compose.yml` ships with **no healthcheck**: the image is distroless (no shell, no `curl`), so an in-container `exec` probe is impossible. Probe liveness externally, or via a sidecar:
+
+```bash
+curl -sf localhost:8080/agentic/health   # 200 = up; GET / also works
+```
+
+Public reads are rate-limited per client IP: the TCP peer address, else the **first `x-forwarded-for` entry**, else `"local"` (sockless tests). Behind a reverse proxy the peer is the proxy, so **a trusted proxy you control must set `x-forwarded-for`** — otherwise every read throttles on the proxy's IP, and a caller can spoof the header. Terminate TLS at the proxy and forward to the container:
+
+```caddy
+# Caddyfile — Caddy sets X-Forwarded-For to the real client by default.
+aiter.example.com {
+    reverse_proxy localhost:8080
+}
+```
+
+Keep the container's port private to the proxy; expose only the proxy to the internet. Traefik works the same way (its `forwardedHeaders` come from the trusted set).
+
+**State is in-process today (demo-grade).** Carts, sessions, orders, and consents live in in-memory stores inside the server process, so a container restart loses them. When durable persistence lands (the `sled`-backed store in `aiter-core` is the plan), mount a volume for the store directory rather than redesigning the image.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
