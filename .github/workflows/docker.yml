@@ -1,0 +1,106 @@
+name: Docker
+
+# PR gate for everything Docker: prove the multi-stage Dockerfile builds and
+# that `docker compose up` serves a working aiter-server (health + webhook
+# paths). Local-only by design — no registry login, no push (the release
+# workflow owns publishing). Runners have dockerd + buildx; dev environments
+# don't, which is why this lives here.
+#
+# The build and compose jobs may land on different runners, so the image
+# travels between them as a tar artifact instead of via a registry.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: aiter-commerce
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+
+      # Ship the built image to the compose job (no push on PRs).
+      - name: Export image artifact
+        run: docker save "$IMAGE" | gzip > image.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.tar.gz
+          retention-days: 1
+
+  compose:
+    name: Compose smoke test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      - name: Load image
+        run: docker load < image.tar.gz
+
+      # Placeholder Razorpay credentials from .env.example are enough to boot;
+      # they are only used if a real payment call is attempted.
+      - name: Start compose stack
+        run: |
+          cp .env.example .env
+          docker compose up -d
+
+      # GET /agentic/health must return status ok once the server is listening.
+      - name: Probe health endpoint
+        run: |
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8080/agentic/health | grep -q '"status":"ok"'; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::GET /agentic/health never returned {\"status\":\"ok\"}"
+            docker compose logs app
+            exit 1
+          fi
+
+      # POST /webhooks/razorpay is public but HMAC-verified and fails closed,
+      # so a bogus signature must get exactly 401 — proving the route reaches
+      # signature verification on the running server.
+      - name: Probe webhook endpoint
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://localhost:8080/webhooks/razorpay \
+            -H 'Content-Type: application/json' \
+            -H 'X-Razorpay-Signature: deadbeef' \
+            -d '{"event":"payment.captured","payload":{}}')"
+          echo "webhook returned HTTP $code"
+          if [ "$code" != "401" ]; then
+            echo "::error::expected 401 from unsigned webhook, got $code"
+            docker compose logs app
+            exit 1
+          fi
+
+      - name: Tear down compose stack
+        if: always()
+        run: docker compose down --volumes || true
