@@ -20,3 +20,31 @@ services:
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     restart: unless-stopped
+
+  # --- Dev/test container ---------------------------------------------------
+  # Runs CI's quality gates (fmt, clippy, test, build) inside a container, so
+  # the host needs no Rust toolchain. Enabled only via its `dev` profile —
+  # `docker compose up` never starts it. The repo is bind-mounted read-write,
+  # so edits on the host are picked up immediately; cargo artifacts land in
+  # named volumes so they persist across runs without touching your checkout.
+  #
+  #   docker compose run --rm dev                          # scripts/check.sh (all gates)
+  #   docker compose run --rm dev cargo test --all-features
+  #   docker compose run --rm dev cargo fmt --check
+  #   docker compose run --rm dev cargo clippy --all-targets --all-features -- -D warnings
+  dev:
+    image: aiter-commerce-dev
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    working_dir: /workspace
+    command: bash scripts/check.sh
+    volumes:
+      - .:/workspace
+      - cargo-target:/workspace/target
+      - cargo-home:/usr/local/cargo/registry
+
+volumes:
+  cargo-target:
+  cargo-home:

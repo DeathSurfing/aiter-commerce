@@ -22,6 +22,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
+use std::sync::Mutex;
 
 use aiter_core::amount::{Amount, Currency};
 use aiter_core::cart::{Cart, LineItem};
@@ -34,6 +35,12 @@ use aiter_server::test_util::{send_text, signed, signed_raw};
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Serializes tests that mutate the process-global `RAZORPAY_*` env vars:
+/// two webhook tests set/remove the same variables, and without a single
+/// shared lock one can observe the other's cleanup mid-request (a 503
+/// "RAZORPAY_KEY_ID is required" instead of the expected 401).
+static RAZORPAY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Deterministic xorshift64 PRNG (same family as `pricing.rs`'s property
 /// tests, so the "random" sweeps are fully reproducible).
@@ -426,9 +433,6 @@ async fn malformed_reserve_pay_bodies_are_clean_4xx() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn malformed_webhook_and_query_inputs_are_clean() {
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     let app = test_app();
 
     let with_razorpay_env = async {
@@ -495,7 +499,7 @@ async fn malformed_webhook_and_query_inputs_are_clean() {
         );
     };
     {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = RAZORPAY_ENV_LOCK.lock().unwrap();
         with_razorpay_env.await;
         std::env::remove_var("RAZORPAY_KEY_ID");
         std::env::remove_var("RAZORPAY_KEY_SECRET");
@@ -1103,9 +1107,6 @@ async fn fuzzish_random_bodies_never_5xx_or_panic() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn fuzzish_webhook_garbage_never_5xx_or_panic() {
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     let app = test_app();
     let mut rng = XorShift(0xDEAD_2026_0808_BEEF);
 
@@ -1144,7 +1145,7 @@ async fn fuzzish_webhook_garbage_never_5xx_or_panic() {
         }
     };
     {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = RAZORPAY_ENV_LOCK.lock().unwrap();
         with_env.await;
         std::env::remove_var("RAZORPAY_KEY_ID");
         std::env::remove_var("RAZORPAY_KEY_SECRET");

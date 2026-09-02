@@ -17,5 +17,8 @@ aiter.env
 *.swp
 .DS_Store
 
+# Local opencode skills (kept out of the repo by design)
+.opencode/
+
 # Logs
 *.log
