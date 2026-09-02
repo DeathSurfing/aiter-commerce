@@ -141,6 +141,17 @@ Behavioral guarantees:
 ./scripts/check.sh   # cargo fmt --check, clippy -D warnings, test, build --release
 ```
 
+No Rust toolchain on the host? The same gates run in a container — the `dev`
+service in `compose.yml` (profiled, so `docker compose up` never starts it)
+bind-mounts the checkout and caches cargo artifacts in named volumes:
+
+```bash
+docker compose run --rm dev                          # scripts/check.sh (all four gates)
+docker compose run --rm dev cargo test --all-features
+docker compose run --rm dev cargo fmt --check
+docker compose run --rm dev cargo clippy --all-targets --all-features -- -D warnings
+```
+
 CI (`.github/workflows/ci.yml`) runs the same four gates on every push and pull request. Two more workflows build on it: `docker.yml` is the Docker PR gate (builds the image and runs a compose smoke test on PRs), and `release.yml` builds and pushes multi-arch images to `ghcr.io/deathsurfing/aiter-commerce` on `v*` tags.
 
 ## Deploy with Docker

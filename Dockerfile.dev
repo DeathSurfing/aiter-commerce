@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+#
+# Dev/test image for AITER COMMERCE — runs the same quality gates as CI
+# (fmt, clippy, test, build) inside a container, so nothing needs installing
+# on the host. Unlike Dockerfile, this image ships the full toolchain and is
+# meant to be used with a source bind mount (see the `dev` service in
+# compose.yml), not as a runtime image.
+#
+# Build:   docker build -f Dockerfile.dev -t aiter-commerce-dev .
+# Run:     docker compose run --rm dev                     # full gates
+#          docker compose run --rm dev cargo test --all-features
+
+FROM rust:1-bookworm
+
+# The official rust image installs a minimal toolchain; add the extra gates
+# CI runs (rustfmt, clippy) so scripts/check.sh works out of the box.
+RUN rustup component add rustfmt clippy
+
+WORKDIR /workspace
+
+CMD ["bash", "scripts/check.sh"]
