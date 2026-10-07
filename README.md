@@ -10,6 +10,11 @@ Concretely, an agent can:
 
 Built in Rust: `aiter-core` holds pure, money-safe commerce logic (integer minor units, never floats); `aiter-server` is a thin axum HTTP surface. Designed to plug into the emerging agentic-payments protocol stack (ACP / UCP / AP2 / x402 / UPI Reserve Pay) rather than invent its own.
 
+> **Read the write-up:** how the money-safety layer works, including signed
+> agent requests, integer minor units, and webhook reconciliation that fails
+> closed, is at
+> [adityavikram.dev/blog/making-a-merchant-agent-buyable](https://adityavikram.dev/blog/making-a-merchant-agent-buyable).
+
 ## Workspace layout
 
 ```
