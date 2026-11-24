@@ -1,5 +1,28 @@
 # AITER COMMERCE
 
+**An AI agent can buy from a store that already exists.** The merchant keeps their storefront and their payment provider and gains an API an agent can discover, sign requests against, and pay through.
+
+| | |
+|---|---|
+| **Try it** | `cargo run -p aiter-server` in one shell, then `cargo run --bin aiter-cli -- --base http://localhost:8080` in another |
+| **Prove it** | `cargo test --workspace`. 171 tests, no network, no keys (checked 2026-11-24) |
+| **What you see** | a product, a signed cart, a checkout session, an order, and a payment link, printed as it goes |
+| **What is not** | one merchant per process, an embedded demo catalog and demo agent, an in-memory store |
+
+The buying agent is a 108-line CLI in this repo, and the whole purchase below ran against a local server with no configuration:
+
+```text
+$ cargo run -q --bin aiter-cli -- --base http://localhost:8080
+product:      p-coldbrew
+cart:         cart-0
+session:      cs-1
+order:        ord-cs-1
+
+payment link: https://rzp.io/i/mock123
+```
+
+The payment link in that run came from a local mock. Minting a real one needs Razorpay keys, or the mock described under [Payments](#payments-razorpay).
+
 AITER COMMERCE makes a merchant **agent-buyable**: it wraps an existing store and its payment rails in a machine-readable, agent-friendly API, so AI agents (LLMs and autonomous shoppers) can discover products, build a cart, and complete a purchase end to end — while the merchant keeps their existing storefront and checkout.
 
 Concretely, an agent can:
